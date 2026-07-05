@@ -8,10 +8,12 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"sync/atomic"
 	"time"
 
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
+	"github.com/openlibrecommunity/olcrtc/internal/udpenvelope"
 	"github.com/openlibrecommunity/olcrtc/internal/udpwire"
 )
 
@@ -191,7 +193,12 @@ func (c *Client) forwardLocalUDP(
 		logger.Debugf("drop udp packet encode failed: %v", err)
 		return
 	}
-	enc, err := c.cipher.Encrypt(wire)
+	plain, err := c.encodeUDPDatagram(wire)
+	if err != nil {
+		logger.Debugf("drop udp packet envelope failed: %v", err)
+		return
+	}
+	enc, err := c.cipher.Encrypt(plain)
 	if err != nil {
 		logger.Debugf("drop udp packet encrypt failed: %v", err)
 		return
@@ -208,9 +215,14 @@ func (c *Client) onDatagram(ciphertext []byte) {
 	if c.udpDisabled {
 		return
 	}
-	wire, err := c.cipher.Decrypt(ciphertext)
+	plain, err := c.cipher.Decrypt(ciphertext)
 	if err != nil {
 		logger.Debugf("drop udp datagram decrypt failed: %v", err)
+		return
+	}
+	wire, err := c.decodeUDPDatagram(plain)
+	if err != nil {
+		logger.Debugf("drop udp datagram envelope failed: %v", err)
 		return
 	}
 	frame, err := udpwire.Decode(wire)
@@ -339,12 +351,43 @@ func (c *Client) sendUDPFlowCloses(flowIDs []uint64) {
 		if err != nil {
 			continue
 		}
-		enc, err := c.cipher.Encrypt(wire)
+		plain, err := c.encodeUDPDatagram(wire)
+		if err != nil {
+			continue
+		}
+		enc, err := c.cipher.Encrypt(plain)
 		if err != nil {
 			continue
 		}
 		_ = dg.SendDatagram(enc)
 	}
+}
+
+func (c *Client) encodeUDPDatagram(payload []byte) ([]byte, error) {
+	seq := atomic.AddUint64(&c.udpSendSeq, 1)
+	plain, err := udpenvelope.Encode(seq, payload, udpenvelope.RandomPaddingLen(c.udpPaddingMax))
+	if err != nil {
+		return nil, fmt.Errorf("encode udp envelope: %w", err)
+	}
+	return plain, nil
+}
+
+func (c *Client) decodeUDPDatagram(plain []byte) ([]byte, error) {
+	env, err := udpenvelope.Decode(plain)
+	if err != nil {
+		return nil, fmt.Errorf("decode udp envelope: %w", err)
+	}
+	if c.udpReplayProtectionDisabled {
+		return env.Payload, nil
+	}
+
+	c.udpMu.Lock()
+	ok := c.udpReplay.Accept(env.Sequence)
+	c.udpMu.Unlock()
+	if !ok {
+		return nil, udpenvelope.ErrReplay
+	}
+	return env.Payload, nil
 }
 
 func (c *Client) waitSessionReady(ctx context.Context) bool {

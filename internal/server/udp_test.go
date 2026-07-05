@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openlibrecommunity/olcrtc/internal/udpenvelope"
 	"github.com/openlibrecommunity/olcrtc/internal/udpwire"
 )
 
@@ -17,6 +18,33 @@ const (
 	testUDPDNSGoogle     = "8.8.8.8"
 	testUDPDNSCloudflare = "1.1.1.1"
 )
+
+func TestServerUDPDatagramEnvelopeRejectsReplayPerPeer(t *testing.T) {
+	s := &Server{
+		udpPaddingMax: 3,
+		udpReplay:     make(map[string]*udpenvelope.ReplayWindow),
+	}
+	payload := []byte("udp-wire")
+
+	plain, err := s.encodeUDPDatagram(payload)
+	if err != nil {
+		t.Fatalf("encodeUDPDatagram() error = %v", err)
+	}
+	got, err := s.decodeUDPDatagram(testUDPPeerID, plain)
+	if err != nil {
+		t.Fatalf("decodeUDPDatagram() error = %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("decodeUDPDatagram() payload = %q, want %q", got, payload)
+	}
+	_, err = s.decodeUDPDatagram(testUDPPeerID, plain)
+	if !errors.Is(err, udpenvelope.ErrReplay) {
+		t.Fatalf("decodeUDPDatagram(replay) error = %v, want %v", err, udpenvelope.ErrReplay)
+	}
+	if _, err := s.decodeUDPDatagram("other-peer", plain); err != nil {
+		t.Fatalf("decodeUDPDatagram(other-peer) error = %v", err)
+	}
+}
 
 func TestCloseUDPFlowReportsTrafficOnce(t *testing.T) {
 	left, right := net.Pipe()

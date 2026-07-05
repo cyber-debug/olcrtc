@@ -170,8 +170,10 @@ type Traffic struct {
 
 // UDP controls the lossy SOCKS5 UDP ASSOCIATE relay.
 type UDP struct {
-	Disabled *bool `yaml:"disabled"`
-	MaxFlows *int  `yaml:"max_flows"`
+	Disabled                 *bool `yaml:"disabled"`
+	MaxFlows                 *int  `yaml:"max_flows"`
+	PaddingMax               int   `yaml:"padding_max"`
+	ReplayProtectionDisabled bool  `yaml:"replay_protection_disabled"`
 }
 
 // Gen controls room-generation mode.
@@ -304,6 +306,8 @@ func Apply(dst session.Config, f File) session.Config {
 	if f.UDP.MaxFlows != nil {
 		dst.UDPMaxFlows = pickInt(dst.UDPMaxFlows, *f.UDP.MaxFlows)
 	}
+	dst.UDPPaddingMax = pickInt(dst.UDPPaddingMax, f.UDP.PaddingMax)
+	dst.UDPReplayProtectionDisabled = dst.UDPReplayProtectionDisabled || f.UDP.ReplayProtectionDisabled
 	dst.Amount = pickInt(dst.Amount, f.Gen.Amount)
 	return dst
 }
@@ -358,6 +362,8 @@ func ApplyProfile(base session.Config, p Profile) session.Config {
 	if p.UDP.MaxFlows != nil {
 		dst.UDPMaxFlows = *p.UDP.MaxFlows
 	}
+	dst.UDPPaddingMax = overlayInt(dst.UDPPaddingMax, p.UDP.PaddingMax)
+	dst.UDPReplayProtectionDisabled = dst.UDPReplayProtectionDisabled || p.UDP.ReplayProtectionDisabled
 	return dst
 }
 

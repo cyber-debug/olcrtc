@@ -53,6 +53,8 @@ traffic:
 udp:
   disabled: true
   max_flows: 77
+  padding_max: 32
+  replay_protection_disabled: true
 gen:
   amount: 3
 debug: true
@@ -90,27 +92,29 @@ func requireLoadedFile(t *testing.T, f File) {
 func requireAppliedConfig(t *testing.T, got session.Config) {
 	t.Helper()
 	want := session.Config{
-		Mode:                  testModeSrv,
-		Auth:                  testAuthProvider,
-		RoomID:                testRoomID,
-		KeyHex:                testCryptoKey,
-		Transport:             "datachannel",
-		DNSServer:             testDNSServer,
-		SOCKSHost:             "127.0.0.1",
-		SOCKSPort:             1080,
-		SOCKSUser:             "u",
-		SOCKSPass:             "p",
-		VP8:                   session.VP8Config{FPS: 25, BatchSize: 4},
-		LivenessInterval:      "2s",
-		LivenessTimeout:       "500ms",
-		LivenessFailures:      4,
-		MaxSessionDuration:    "6h",
-		TrafficMaxPayloadSize: 4096,
-		TrafficMinDelay:       "5ms",
-		TrafficMaxDelay:       "30ms",
-		UDPDisabled:           true,
-		UDPMaxFlows:           77,
-		Amount:                3,
+		Mode:                        testModeSrv,
+		Auth:                        testAuthProvider,
+		RoomID:                      testRoomID,
+		KeyHex:                      testCryptoKey,
+		Transport:                   "datachannel",
+		DNSServer:                   testDNSServer,
+		SOCKSHost:                   "127.0.0.1",
+		SOCKSPort:                   1080,
+		SOCKSUser:                   "u",
+		SOCKSPass:                   "p",
+		VP8:                         session.VP8Config{FPS: 25, BatchSize: 4},
+		LivenessInterval:            "2s",
+		LivenessTimeout:             "500ms",
+		LivenessFailures:            4,
+		MaxSessionDuration:          "6h",
+		TrafficMaxPayloadSize:       4096,
+		TrafficMinDelay:             "5ms",
+		TrafficMaxDelay:             "30ms",
+		UDPDisabled:                 true,
+		UDPMaxFlows:                 77,
+		UDPPaddingMax:               32,
+		UDPReplayProtectionDisabled: true,
+		Amount:                      3,
 	}
 	if got != want {
 		t.Fatalf("Apply produced wrong config: %+v, want %+v", got, want)
@@ -165,6 +169,7 @@ traffic:
   max_delay: 40ms
 udp:
   max_flows: 100
+  padding_max: 8
 profiles:
   - name: wb-vp8
     auth:
@@ -185,6 +190,8 @@ profiles:
     udp:
       disabled: true
       max_flows: 10
+      padding_max: 16
+      replay_protection_disabled: true
   - name: jitsi-dc
     auth:
       provider: jitsi
@@ -244,22 +251,24 @@ func TestApplyKeepsCLIUDPDisabled(t *testing.T) {
 func requireFirstProfile(t *testing.T, first session.Config) {
 	t.Helper()
 	want := session.Config{
-		Mode:                  testModeSrv,
-		Auth:                  "wbstream",
-		RoomID:                "wb-room",
-		KeyHex:                "shared-key",
-		Transport:             "vp8channel",
-		DNSServer:             testDNSServer,
-		VP8:                   session.VP8Config{FPS: 30},
-		LivenessInterval:      "1s",
-		LivenessTimeout:       "2s",
-		LivenessFailures:      5,
-		MaxSessionDuration:    "30m",
-		TrafficMaxPayloadSize: 4096,
-		TrafficMinDelay:       "10ms",
-		TrafficMaxDelay:       "20ms",
-		UDPDisabled:           true,
-		UDPMaxFlows:           10,
+		Mode:                        testModeSrv,
+		Auth:                        "wbstream",
+		RoomID:                      "wb-room",
+		KeyHex:                      "shared-key",
+		Transport:                   "vp8channel",
+		DNSServer:                   testDNSServer,
+		VP8:                         session.VP8Config{FPS: 30},
+		LivenessInterval:            "1s",
+		LivenessTimeout:             "2s",
+		LivenessFailures:            5,
+		MaxSessionDuration:          "30m",
+		TrafficMaxPayloadSize:       4096,
+		TrafficMinDelay:             "10ms",
+		TrafficMaxDelay:             "20ms",
+		UDPDisabled:                 true,
+		UDPMaxFlows:                 10,
+		UDPPaddingMax:               16,
+		UDPReplayProtectionDisabled: true,
 	}
 	if first != want {
 		t.Fatalf("first profile = %+v, want %+v", first, want)
@@ -283,6 +292,7 @@ func requireSecondProfile(t *testing.T, second session.Config) {
 		TrafficMinDelay:       "10ms",
 		TrafficMaxDelay:       "40ms",
 		UDPMaxFlows:           100,
+		UDPPaddingMax:         8,
 	}
 	if second != want {
 		t.Fatalf("second profile = %+v, want %+v", second, want)

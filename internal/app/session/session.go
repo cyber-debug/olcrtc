@@ -23,6 +23,7 @@ import (
 	"github.com/openlibrecommunity/olcrtc/internal/transport/seichannel"
 	"github.com/openlibrecommunity/olcrtc/internal/transport/videochannel"
 	"github.com/openlibrecommunity/olcrtc/internal/transport/vp8channel"
+	"github.com/openlibrecommunity/olcrtc/internal/udpenvelope"
 )
 
 const (
@@ -140,9 +141,11 @@ var (
 	ErrTrafficMaxDelayInvalid = errors.New(
 		"invalid traffic max delay (set traffic.max_delay to a duration >= 0 and >= traffic.min_delay)")
 	// ErrUDPMaxFlowsInvalid indicates that udp.max_flows is negative.
-	ErrUDPMaxFlowsInvalid  = errors.New("invalid udp max flows (set udp.max_flows to 0 or a positive value)")
-	errPositiveDuration    = errors.New("duration must be > 0")
-	errNonNegativeDuration = errors.New("duration must be >= 0")
+	ErrUDPMaxFlowsInvalid = errors.New("invalid udp max flows (set udp.max_flows to 0 or a positive value)")
+	// ErrUDPPaddingMaxInvalid indicates that udp.padding_max is outside the supported envelope range.
+	ErrUDPPaddingMaxInvalid = errors.New("invalid udp padding max")
+	errPositiveDuration     = errors.New("duration must be > 0")
+	errNonNegativeDuration  = errors.New("duration must be >= 0")
 )
 
 // VideoConfig holds tunables for the videochannel transport.
@@ -175,38 +178,40 @@ type SEIConfig struct {
 
 // Config holds runtime session settings.
 type Config struct {
-	Mode                  string
-	Transport             string
-	Auth                  string
-	AuthToken             string
-	Engine                string
-	URL                   string
-	Token                 string
-	RoomID                string
-	ChannelID             string
-	KeyHex                string
-	SOCKSHost             string
-	SOCKSPort             int
-	SOCKSUser             string
-	SOCKSPass             string
-	DNSServer             string
-	SOCKSProxyAddr        string
-	SOCKSProxyPort        int
-	SOCKSProxyUser        string
-	SOCKSProxyPass        string
-	Video                 VideoConfig
-	VP8                   VP8Config
-	SEI                   SEIConfig
-	LivenessInterval      string
-	LivenessTimeout       string
-	LivenessFailures      int
-	MaxSessionDuration    string
-	TrafficMaxPayloadSize int
-	TrafficMinDelay       string
-	TrafficMaxDelay       string
-	UDPDisabled           bool
-	UDPMaxFlows           int
-	Amount                int
+	Mode                        string
+	Transport                   string
+	Auth                        string
+	AuthToken                   string
+	Engine                      string
+	URL                         string
+	Token                       string
+	RoomID                      string
+	ChannelID                   string
+	KeyHex                      string
+	SOCKSHost                   string
+	SOCKSPort                   int
+	SOCKSUser                   string
+	SOCKSPass                   string
+	DNSServer                   string
+	SOCKSProxyAddr              string
+	SOCKSProxyPort              int
+	SOCKSProxyUser              string
+	SOCKSProxyPass              string
+	Video                       VideoConfig
+	VP8                         VP8Config
+	SEI                         SEIConfig
+	LivenessInterval            string
+	LivenessTimeout             string
+	LivenessFailures            int
+	MaxSessionDuration          string
+	TrafficMaxPayloadSize       int
+	TrafficMinDelay             string
+	TrafficMaxDelay             string
+	UDPDisabled                 bool
+	UDPMaxFlows                 int
+	UDPPaddingMax               int
+	UDPReplayProtectionDisabled bool
+	Amount                      int
 }
 
 // RegisterDefaults registers built-in carriers and transports.
@@ -561,6 +566,9 @@ func validateUDPConfig(cfg Config) error {
 	if cfg.UDPMaxFlows < 0 {
 		return ErrUDPMaxFlowsInvalid
 	}
+	if cfg.UDPPaddingMax < 0 || cfg.UDPPaddingMax > udpenvelope.MaxPaddingLen {
+		return ErrUDPPaddingMaxInvalid
+	}
 	return nil
 }
 
@@ -661,25 +669,27 @@ func runOnce(
 	switch cfg.Mode {
 	case modeSRV:
 		if err := server.Run(ctx, server.Config{
-			Transport:        cfg.Transport,
-			Carrier:          cfg.Auth,
-			RoomURL:          roomURL,
-			ChannelID:        cfg.ChannelID,
-			KeyHex:           cfg.KeyHex,
-			DNSServer:        cfg.DNSServer,
-			SOCKSProxyAddr:   cfg.SOCKSProxyAddr,
-			SOCKSProxyPort:   cfg.SOCKSProxyPort,
-			SOCKSProxyUser:   cfg.SOCKSProxyUser,
-			SOCKSProxyPass:   cfg.SOCKSProxyPass,
-			TransportOptions: opts,
-			Engine:           cfg.Engine,
-			URL:              cfg.URL,
-			Token:            cfg.Token,
-			AuthToken:        cfg.AuthToken,
-			Liveness:         liveness,
-			Traffic:          traffic,
-			UDPDisabled:      cfg.UDPDisabled,
-			UDPMaxFlows:      cfg.UDPMaxFlows,
+			Transport:                   cfg.Transport,
+			Carrier:                     cfg.Auth,
+			RoomURL:                     roomURL,
+			ChannelID:                   cfg.ChannelID,
+			KeyHex:                      cfg.KeyHex,
+			DNSServer:                   cfg.DNSServer,
+			SOCKSProxyAddr:              cfg.SOCKSProxyAddr,
+			SOCKSProxyPort:              cfg.SOCKSProxyPort,
+			SOCKSProxyUser:              cfg.SOCKSProxyUser,
+			SOCKSProxyPass:              cfg.SOCKSProxyPass,
+			TransportOptions:            opts,
+			Engine:                      cfg.Engine,
+			URL:                         cfg.URL,
+			Token:                       cfg.Token,
+			AuthToken:                   cfg.AuthToken,
+			Liveness:                    liveness,
+			Traffic:                     traffic,
+			UDPDisabled:                 cfg.UDPDisabled,
+			UDPMaxFlows:                 cfg.UDPMaxFlows,
+			UDPPaddingMax:               cfg.UDPPaddingMax,
+			UDPReplayProtectionDisabled: cfg.UDPReplayProtectionDisabled,
 			OnSessionOpen: func(sessionID, deviceID string, claims map[string]any) {
 				logger.Infof("session opened: id=%s device=%s claims=%v", sessionID, deviceID, claims)
 			},
@@ -695,24 +705,26 @@ func runOnce(
 		return nil
 	case modeCNC:
 		if err := client.Run(ctx, client.Config{
-			Transport:        cfg.Transport,
-			Carrier:          cfg.Auth,
-			RoomURL:          roomURL,
-			ChannelID:        cfg.ChannelID,
-			KeyHex:           cfg.KeyHex,
-			LocalAddr:        fmt.Sprintf("%s:%d", cfg.SOCKSHost, cfg.SOCKSPort),
-			DNSServer:        cfg.DNSServer,
-			SOCKSUser:        cfg.SOCKSUser,
-			SOCKSPass:        cfg.SOCKSPass,
-			TransportOptions: opts,
-			Engine:           cfg.Engine,
-			URL:              cfg.URL,
-			Token:            cfg.Token,
-			AuthToken:        cfg.AuthToken,
-			Liveness:         liveness,
-			Traffic:          traffic,
-			UDPDisabled:      cfg.UDPDisabled,
-			UDPMaxFlows:      cfg.UDPMaxFlows,
+			Transport:                   cfg.Transport,
+			Carrier:                     cfg.Auth,
+			RoomURL:                     roomURL,
+			ChannelID:                   cfg.ChannelID,
+			KeyHex:                      cfg.KeyHex,
+			LocalAddr:                   fmt.Sprintf("%s:%d", cfg.SOCKSHost, cfg.SOCKSPort),
+			DNSServer:                   cfg.DNSServer,
+			SOCKSUser:                   cfg.SOCKSUser,
+			SOCKSPass:                   cfg.SOCKSPass,
+			TransportOptions:            opts,
+			Engine:                      cfg.Engine,
+			URL:                         cfg.URL,
+			Token:                       cfg.Token,
+			AuthToken:                   cfg.AuthToken,
+			Liveness:                    liveness,
+			Traffic:                     traffic,
+			UDPDisabled:                 cfg.UDPDisabled,
+			UDPMaxFlows:                 cfg.UDPMaxFlows,
+			UDPPaddingMax:               cfg.UDPPaddingMax,
+			UDPReplayProtectionDisabled: cfg.UDPReplayProtectionDisabled,
 		}); err != nil {
 			return fmt.Errorf("client: %w", err)
 		}
