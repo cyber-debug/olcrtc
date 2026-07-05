@@ -34,6 +34,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/openlibrecommunity/olcrtc/internal/auth"
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
@@ -231,8 +232,32 @@ func (s *Session) Dial(ctx context.Context) (net.Conn, error) {
 		return nil, err
 	}
 	go s.inner.WatchConnection(ctx)
+	if err := s.waitReady(ctx); err != nil {
+		_ = s.Close()
+		return nil, err
+	}
 	s.counters.StreamOpened()
 	return &conn{s: s}, nil
+}
+
+func (s *Session) waitReady(ctx context.Context) error {
+	if s.CanSend() {
+		return nil
+	}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait ready: %w", ctx.Err())
+		case <-s.done:
+			return ErrSessionEnded
+		case <-ticker.C:
+			if s.CanSend() {
+				return nil
+			}
+		}
+	}
 }
 
 // OpenStream opens one reliable ordered byte stream. It is equivalent to
