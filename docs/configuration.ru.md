@@ -74,6 +74,8 @@ olcrtc /etc/olcrtc/client.yaml
 | `traffic.min_delay` / `traffic.max_delay` | необязательный pacing отправки, например `5ms` / `30ms` |
 | `udp.disabled` | выключает SOCKS5 UDP ASSOCIATE relay; по умолчанию `false` |
 | `udp.max_flows` | максимум живых UDP flow-маппингов на процесс; `0` = стандартно `1024` |
+| `udp.padding_max` | верхняя граница случайного padding для зашифрованных UDP datagram, в байтах; `0` = выключено |
+| `udp.replay_protection_disabled` | выключает replay protection для UDP datagram; по умолчанию `false` |
 | `gen.amount` | режим `gen`: сколько комнат создать |
 | `profiles[]` | список failover-профилей для `srv`/`cnc` |
 | `failover.retry_delay` | пауза перед следующим профилем, например `2s` |
@@ -81,6 +83,9 @@ olcrtc /etc/olcrtc/client.yaml
 | `data` | путь к директории с runtime-данными (`names`, `surnames`) |
 | `debug` | подробное логирование |
 | `ffmpeg` | путь к бинарнику ffmpeg для `videochannel` |
+
+UDP datagram оборачиваются в версионированный зашифрованный envelope перед
+relay-доставкой. Клиент и сервер нужно обновлять вместе при изменениях UDP relay.
 
 `crypto.key_file` читается относительно YAML-файла. Нельзя одновременно задавать `crypto.key` и `crypto.key_file`.
 

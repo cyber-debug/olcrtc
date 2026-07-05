@@ -13,6 +13,7 @@ import (
 
 	"github.com/openlibrecommunity/olcrtc/internal/logger"
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
+	"github.com/openlibrecommunity/olcrtc/internal/udpenvelope"
 	"github.com/openlibrecommunity/olcrtc/internal/udpwire"
 )
 
@@ -55,9 +56,14 @@ func (s *Server) handleDatagram(peerID string, ciphertext []byte) {
 	if s.udpDisabled {
 		return
 	}
-	wire, err := s.cipher.Decrypt(ciphertext)
+	plain, err := s.cipher.Decrypt(ciphertext)
 	if err != nil {
 		logger.Debugf("drop udp datagram decrypt failed: %v", err)
+		return
+	}
+	wire, err := s.decodeUDPDatagram(peerID, plain)
+	if err != nil {
+		logger.Debugf("drop udp datagram envelope failed: %v", err)
 		return
 	}
 	frame, err := udpwire.Decode(wire)
@@ -192,7 +198,12 @@ func (s *Server) sendUDPFrame(peerID string, frame udpwire.Frame) {
 		logger.Debugf("udp relay encode response failed: %v", err)
 		return
 	}
-	enc, err := s.cipher.Encrypt(wire)
+	plain, err := s.encodeUDPDatagram(wire)
+	if err != nil {
+		logger.Debugf("udp relay envelope response failed: %v", err)
+		return
+	}
+	enc, err := s.cipher.Encrypt(plain)
 	if err != nil {
 		logger.Debugf("udp relay encrypt response failed: %v", err)
 		return
@@ -212,6 +223,38 @@ func (s *Server) sendUDPFrame(peerID string, frame udpwire.Frame) {
 	if err := dg.SendDatagram(enc); err != nil {
 		logger.Debugf("udp relay send failed: %v", err)
 	}
+}
+
+func (s *Server) encodeUDPDatagram(payload []byte) ([]byte, error) {
+	seq := atomic.AddUint64(&s.udpSendSeq, 1)
+	plain, err := udpenvelope.Encode(seq, payload, udpenvelope.RandomPaddingLen(s.udpPaddingMax))
+	if err != nil {
+		return nil, fmt.Errorf("encode udp envelope: %w", err)
+	}
+	return plain, nil
+}
+
+func (s *Server) decodeUDPDatagram(peerID string, plain []byte) ([]byte, error) {
+	env, err := udpenvelope.Decode(plain)
+	if err != nil {
+		return nil, fmt.Errorf("decode udp envelope: %w", err)
+	}
+	if s.udpReplayProtectionDisabled {
+		return env.Payload, nil
+	}
+
+	s.udpMu.Lock()
+	window := s.udpReplay[peerID]
+	if window == nil {
+		window = &udpenvelope.ReplayWindow{}
+		s.udpReplay[peerID] = window
+	}
+	ok := window.Accept(env.Sequence)
+	s.udpMu.Unlock()
+	if !ok {
+		return nil, udpenvelope.ErrReplay
+	}
+	return env.Payload, nil
 }
 
 func (s *Server) closeUDPFlow(key serverUDPKey) {

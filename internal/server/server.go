@@ -24,6 +24,7 @@ import (
 	"github.com/openlibrecommunity/olcrtc/internal/names"
 	"github.com/openlibrecommunity/olcrtc/internal/runtime"
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
+	"github.com/openlibrecommunity/olcrtc/internal/udpenvelope"
 	"github.com/xtaci/smux"
 )
 
@@ -104,10 +105,14 @@ type Server struct {
 	unsafeAllowPrivateUDPTargets bool
 	udpDisabled                  bool
 	maxUDPFlows                  int
+	udpPaddingMax                int
+	udpReplayProtectionDisabled  bool
+	udpSendSeq                   uint64
 	done                         chan struct{}
 	doneOnce                     sync.Once
 	udpMu                        sync.Mutex
 	udpFlows                     map[serverUDPKey]*serverUDPFlow
+	udpReplay                    map[string]*udpenvelope.ReplayWindow
 }
 
 // peerStat holds the per-session info needed to report the live peer count
@@ -140,25 +145,27 @@ type ConnectRequest struct {
 
 // Config holds runtime configuration for [Run].
 type Config struct {
-	Transport        string
-	Carrier          string
-	RoomURL          string
-	ChannelID        string
-	KeyHex           string
-	DNSServer        string
-	SOCKSProxyAddr   string
-	SOCKSProxyPort   int
-	SOCKSProxyUser   string
-	SOCKSProxyPass   string
-	TransportOptions transport.Options
-	Engine           string
-	URL              string
-	Token            string
-	AuthToken        string
-	Liveness         control.Config
-	Traffic          transport.TrafficConfig
-	UDPDisabled      bool
-	UDPMaxFlows      int
+	Transport                   string
+	Carrier                     string
+	RoomURL                     string
+	ChannelID                   string
+	KeyHex                      string
+	DNSServer                   string
+	SOCKSProxyAddr              string
+	SOCKSProxyPort              int
+	SOCKSProxyUser              string
+	SOCKSProxyPass              string
+	TransportOptions            transport.Options
+	Engine                      string
+	URL                         string
+	Token                       string
+	AuthToken                   string
+	Liveness                    control.Config
+	Traffic                     transport.TrafficConfig
+	UDPDisabled                 bool
+	UDPMaxFlows                 int
+	UDPPaddingMax               int
+	UDPReplayProtectionDisabled bool
 	// UnsafeAllowPrivateUDPTargets permits UDP relay targets in loopback,
 	// private, link-local and multicast ranges. Leave false outside local
 	// tests/dev setups; enabling it can expose local-network SSRF.
@@ -220,9 +227,12 @@ func Run(ctx context.Context, cfg Config) error {
 		unsafeAllowPrivateUDPTargets: cfg.UnsafeAllowPrivateUDPTargets,
 		udpDisabled:                  cfg.UDPDisabled,
 		maxUDPFlows:                  normalizeMaxUDPFlows(cfg.UDPMaxFlows),
+		udpPaddingMax:                cfg.UDPPaddingMax,
+		udpReplayProtectionDisabled:  cfg.UDPReplayProtectionDisabled,
 		peerSessions:                 make(map[string]*peerSession),
 		peerStats:                    make(map[string]peerStat),
 		udpFlows:                     make(map[serverUDPKey]*serverUDPFlow),
+		udpReplay:                    make(map[string]*udpenvelope.ReplayWindow),
 		done:                         make(chan struct{}),
 	}
 	s.setupResolver()

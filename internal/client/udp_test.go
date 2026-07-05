@@ -3,10 +3,12 @@ package client
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/openlibrecommunity/olcrtc/internal/udpenvelope"
 	"github.com/openlibrecommunity/olcrtc/internal/udpwire"
 )
 
@@ -18,6 +20,27 @@ const (
 
 func clientTestUDPAddr(port int) *net.UDPAddr {
 	return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port}
+}
+
+func TestClientUDPDatagramEnvelopeRejectsReplay(t *testing.T) {
+	c := &Client{udpPaddingMax: 4}
+	payload := []byte("udp-wire")
+
+	plain, err := c.encodeUDPDatagram(payload)
+	if err != nil {
+		t.Fatalf("encodeUDPDatagram() error = %v", err)
+	}
+	got, err := c.decodeUDPDatagram(plain)
+	if err != nil {
+		t.Fatalf("decodeUDPDatagram() error = %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("decodeUDPDatagram() payload = %q, want %q", got, payload)
+	}
+	_, err = c.decodeUDPDatagram(plain)
+	if !errors.Is(err, udpenvelope.ErrReplay) {
+		t.Fatalf("decodeUDPDatagram(replay) error = %v, want %v", err, udpenvelope.ErrReplay)
+	}
 }
 
 func TestRemoveIdleUDPFlowsForConn(t *testing.T) {

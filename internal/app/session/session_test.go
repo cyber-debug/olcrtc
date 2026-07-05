@@ -9,6 +9,7 @@ import (
 
 	"github.com/openlibrecommunity/olcrtc/internal/control"
 	"github.com/openlibrecommunity/olcrtc/internal/runtime"
+	"github.com/openlibrecommunity/olcrtc/internal/udpenvelope"
 )
 
 const testBadDuration = "nope"
@@ -563,6 +564,32 @@ func TestValidate(t *testing.T) {
 				return cfg
 			}(),
 			want: ErrUDPMaxFlowsInvalid,
+		},
+		{
+			name: "udp accepts padding max",
+			cfg: func() Config {
+				cfg := base
+				cfg.UDPPaddingMax = udpenvelope.MaxPaddingLen
+				return cfg
+			}(),
+		},
+		{
+			name: "udp rejects negative padding max",
+			cfg: func() Config {
+				cfg := base
+				cfg.UDPPaddingMax = -1
+				return cfg
+			}(),
+			want: ErrUDPPaddingMaxInvalid,
+		},
+		{
+			name: "udp rejects excessive padding max",
+			cfg: func() Config {
+				cfg := base
+				cfg.UDPPaddingMax = udpenvelope.MaxPaddingLen + 1
+				return cfg
+			}(),
+			want: ErrUDPPaddingMaxInvalid,
 		},
 	}
 

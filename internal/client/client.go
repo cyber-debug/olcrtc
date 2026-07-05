@@ -26,6 +26,7 @@ import (
 	"github.com/openlibrecommunity/olcrtc/internal/names"
 	"github.com/openlibrecommunity/olcrtc/internal/runtime"
 	"github.com/openlibrecommunity/olcrtc/internal/transport"
+	"github.com/openlibrecommunity/olcrtc/internal/udpenvelope"
 	"github.com/openlibrecommunity/olcrtc/internal/udpwire"
 	"github.com/xtaci/smux"
 )
@@ -77,12 +78,16 @@ type Client struct {
 	// sessionReady is closed (and replaced) each time a session becomes fully
 	// established (sessionID != ""). Tunnel handlers wait on it so they do
 	// not open smux streams before the server has accepted the handshake.
-	sessionReady chan struct{}
-	udpMu        sync.Mutex
-	udpFlows     map[uint64]clientUDPFlow
-	udpFlowIndex map[clientUDPFlowKey]uint64
-	udpDisabled  bool
-	maxUDPFlows  int
+	sessionReady                chan struct{}
+	udpMu                       sync.Mutex
+	udpFlows                    map[uint64]clientUDPFlow
+	udpFlowIndex                map[clientUDPFlowKey]uint64
+	udpDisabled                 bool
+	maxUDPFlows                 int
+	udpPaddingMax               int
+	udpReplayProtectionDisabled bool
+	udpSendSeq                  uint64
+	udpReplay                   udpenvelope.ReplayWindow
 }
 
 // HealthFunc is called when the client control health snapshot changes.
@@ -90,24 +95,26 @@ type HealthFunc func(control.Status)
 
 // Config holds runtime configuration for [Run] and [RunWithReady].
 type Config struct {
-	Transport        string
-	Carrier          string
-	RoomURL          string
-	ChannelID        string
-	KeyHex           string
-	LocalAddr        string
-	DNSServer        string
-	SOCKSUser        string
-	SOCKSPass        string
-	TransportOptions transport.Options
-	Engine           string
-	URL              string
-	Token            string
-	AuthToken        string
-	Liveness         control.Config
-	Traffic          transport.TrafficConfig
-	UDPDisabled      bool
-	UDPMaxFlows      int
+	Transport                   string
+	Carrier                     string
+	RoomURL                     string
+	ChannelID                   string
+	KeyHex                      string
+	LocalAddr                   string
+	DNSServer                   string
+	SOCKSUser                   string
+	SOCKSPass                   string
+	TransportOptions            transport.Options
+	Engine                      string
+	URL                         string
+	Token                       string
+	AuthToken                   string
+	Liveness                    control.Config
+	Traffic                     transport.TrafficConfig
+	UDPDisabled                 bool
+	UDPMaxFlows                 int
+	UDPPaddingMax               int
+	UDPReplayProtectionDisabled bool
 
 	// DeviceID overrides the persistent client-side device identifier. Leave
 	// empty to derive one from DeviceIDPath (or generate a random one if both
@@ -147,18 +154,20 @@ func RunWithReady(ctx context.Context, cfg Config, onReady func()) error {
 	}
 
 	c := &Client{
-		cipher:       cipher,
-		deviceID:     deviceID,
-		claims:       cfg.Claims,
-		dnsServer:    cfg.DNSServer,
-		socksUser:    cfg.SOCKSUser,
-		socksPass:    cfg.SOCKSPass,
-		health:       runtime.NewHealthTracker(cfg.OnHealth),
-		sessionReady: make(chan struct{}),
-		udpFlows:     make(map[uint64]clientUDPFlow),
-		udpFlowIndex: make(map[clientUDPFlowKey]uint64),
-		udpDisabled:  cfg.UDPDisabled,
-		maxUDPFlows:  normalizeMaxUDPFlows(cfg.UDPMaxFlows),
+		cipher:                      cipher,
+		deviceID:                    deviceID,
+		claims:                      cfg.Claims,
+		dnsServer:                   cfg.DNSServer,
+		socksUser:                   cfg.SOCKSUser,
+		socksPass:                   cfg.SOCKSPass,
+		health:                      runtime.NewHealthTracker(cfg.OnHealth),
+		sessionReady:                make(chan struct{}),
+		udpFlows:                    make(map[uint64]clientUDPFlow),
+		udpFlowIndex:                make(map[clientUDPFlowKey]uint64),
+		udpDisabled:                 cfg.UDPDisabled,
+		maxUDPFlows:                 normalizeMaxUDPFlows(cfg.UDPMaxFlows),
+		udpPaddingMax:               cfg.UDPPaddingMax,
+		udpReplayProtectionDisabled: cfg.UDPReplayProtectionDisabled,
 	}
 
 	// shutdown is registered BEFORE bringUpLink so we always close any

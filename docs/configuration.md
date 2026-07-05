@@ -74,6 +74,8 @@ Ready-made examples:
 | `traffic.min_delay` / `traffic.max_delay` | optional send pacing, e.g. `5ms` / `30ms` |
 | `udp.disabled` | disables SOCKS5 UDP ASSOCIATE relay; default `false` |
 | `udp.max_flows` | max live UDP flow mappings per process; `0` = default `1024` |
+| `udp.padding_max` | random encrypted datagram padding upper bound in bytes; `0` = disabled |
+| `udp.replay_protection_disabled` | disables UDP datagram replay protection; default `false` |
 | `gen.amount` | `gen` mode: how many rooms to create |
 | `profiles[]` | list of failover profiles for `srv`/`cnc` |
 | `failover.retry_delay` | pause before the next profile, e.g. `2s` |
@@ -81,6 +83,9 @@ Ready-made examples:
 | `data` | path to the directory with runtime data (`names`, `surnames`) |
 | `debug` | verbose logging |
 | `ffmpeg` | path to the ffmpeg binary for `videochannel` |
+
+UDP datagrams are wrapped in a versioned encrypted envelope before relay
+delivery. Upgrade client and server together when enabling UDP relay changes.
 
 `crypto.key_file` is read relative to the YAML file. You cannot set `crypto.key` and `crypto.key_file` at the same time.
 
