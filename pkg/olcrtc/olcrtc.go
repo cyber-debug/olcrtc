@@ -37,6 +37,7 @@ import (
 	"github.com/openlibrecommunity/olcrtc/internal/auth"
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	enginebuiltin "github.com/openlibrecommunity/olcrtc/internal/engine/builtin"
+	"github.com/openlibrecommunity/olcrtc/pkg/olcrtc/transportapi"
 )
 
 var (
@@ -191,6 +192,23 @@ func (s *Session) Dial(ctx context.Context) (net.Conn, error) {
 	}
 	go s.inner.WatchConnection(ctx)
 	return &conn{s: s}, nil
+}
+
+// OpenStream opens one reliable ordered byte stream. It is equivalent to
+// [Session.Dial] and exists so Session satisfies transportapi.Dialer.
+func (s *Session) OpenStream(ctx context.Context) (net.Conn, error) {
+	return s.Dial(ctx)
+}
+
+// Capabilities reports the public transport contract exposed by Session.
+func (s *Session) Capabilities() transportapi.Capabilities {
+	caps := transportapi.DefaultCapabilities()
+	if s == nil || s.inner == nil {
+		return caps
+	}
+	engineCaps := s.inner.Capabilities()
+	caps.LossyDatagrams = engineCaps.Datagram
+	return caps
 }
 
 // Connect establishes the WebRTC connection. Blocks until the data channel (or

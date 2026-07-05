@@ -180,6 +180,8 @@ data: data
 | `cmd/olcrtc-cgo` | c-shared entrypoint |
 | `pkg/olcrtc` | embeddable client/engine API |
 | `pkg/olcrtc/tunnel` | embeddable server tunnel API |
+| `pkg/olcrtc/transportapi` | стабильные transport interfaces, capabilities, datagram contract, metrics |
+| `pkg/olcrtc/vless` | минимальный VLESS TCP adapter поверх reliable stream olcrtc |
 | `mobile` | gomobile bindings для Android |
 | `internal/config` | YAML parsing, `crypto.key_file` |
 | `internal/app/session` | defaults, validation, routing в `srv`/`cnc`/`gen` |
@@ -221,6 +223,19 @@ if err != nil {
 }
 conn, err := sess.Dial(ctx)
 ```
+
+Для protocol integrations `Session` также реализует `transportapi.Dialer`:
+
+```go
+stream, err := sess.OpenStream(ctx)
+caps := sess.Capabilities()
+```
+
+Адаптер `pkg/olcrtc/vless` оставляет olcrtc именно транспортом. Он реализует
+минимальный VLESS TCP request/response framing поверх одного reliable stream
+olcrtc на один request; он не заменяет Xray-core и не является drop-in
+transport для существующих Xray/Happ clients, пока эти clients не научатся
+использовать transport olcrtc.
 
 `pkg/olcrtc/tunnel` встраивает серверную сторону и даёт hooks:
 

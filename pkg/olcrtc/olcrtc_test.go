@@ -9,6 +9,7 @@ import (
 	"github.com/openlibrecommunity/olcrtc/internal/auth"
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	"github.com/openlibrecommunity/olcrtc/pkg/olcrtc"
+	"github.com/openlibrecommunity/olcrtc/pkg/olcrtc/transportapi"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -38,11 +39,14 @@ func (s *stubSession) CanSend() bool                                    { return
 func (s *stubSession) GetSendQueue() chan []byte                        { return nil }
 func (s *stubSession) GetBufferedAmount() uint64                        { return 0 }
 func (s *stubSession) Reconnect(_ string)                               {}
-func (s *stubSession) Capabilities() engine.Capabilities               { return engine.Capabilities{ByteStream: true} }
-func (s *stubSession) SubscriberCanSend() bool                          { return s.connected }
+func (s *stubSession) Capabilities() engine.Capabilities {
+	return engine.Capabilities{ByteStream: true}
+}
+func (s *stubSession) SubscriberCanSend() bool { return s.connected }
 
 // Compile-time check: stubSession must satisfy engine.Session.
 var _ engine.Session = (*stubSession)(nil)
+var _ transportapi.Dialer = (*olcrtc.Session)(nil)
 
 func registerStubEngine(t *testing.T, name string) {
 	t.Helper()
@@ -250,6 +254,27 @@ func TestDial_ReadUnblocksOnSessionEnd(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Read() did not unblock after session ended")
+	}
+}
+
+func TestSessionCapabilities(t *testing.T) {
+	stub := newStubSession()
+	registerStubEngineControlled(t, "stub-caps", stub)
+
+	sess, err := olcrtc.New(context.Background(), olcrtc.Config{
+		Engine: "stub-caps",
+		URL:    stubURL,
+		Token:  stubToken,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	caps := sess.Capabilities()
+	if caps.Version != transportapi.ProtocolVersion || !caps.ReliableStreams || !caps.OrderedStreams {
+		t.Fatalf("Capabilities() = %+v", caps)
+	}
+	if caps.LossyDatagrams {
+		t.Fatalf("Capabilities().LossyDatagrams = true, want false for stub")
 	}
 }
 
