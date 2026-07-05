@@ -2,6 +2,7 @@ package olcrtc
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"sync/atomic"
@@ -111,5 +112,98 @@ func TestManagerReusesCarrierForStreams(t *testing.T) {
 	}
 	if got := client.State(); got != ManagerStateMuxReady {
 		t.Fatalf("client State() = %s, want %s", got, ManagerStateMuxReady)
+	}
+}
+
+func TestManagerFailsOverToNextProfile(t *testing.T) {
+	left, right := net.Pipe()
+	defer left.Close()
+	defer right.Close()
+
+	client := NewManager(ManagerConfig{
+		Profiles: []ProfileConfig{
+			{Name: "broken"},
+			{Name: "working"},
+		},
+	})
+	var clientAttempts atomic.Int32
+	client.newSession = func(_ context.Context, cfg Config) (managerSession, error) {
+		clientAttempts.Add(1)
+		if cfg.Name == "broken" {
+			return nil, errors.New("profile unavailable")
+		}
+		return &fakeManagerSession{open: left}, nil
+	}
+	defer client.Close()
+
+	server := NewManager(ManagerConfig{Server: true})
+	server.newSession = func(context.Context, Config) (managerSession, error) {
+		return &fakeManagerSession{accept: right}, nil
+	}
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, _ := server.AcceptStream(ctx)
+		accepted <- conn
+	}()
+
+	clientConn, err := client.OpenStream(ctx)
+	if err != nil {
+		t.Fatalf("OpenStream() error = %v", err)
+	}
+	serverConn := <-accepted
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	if got := clientAttempts.Load(); got != 2 {
+		t.Fatalf("client session attempts = %d, want 2", got)
+	}
+	idx, profile := client.ActiveProfile()
+	if idx != 1 || profile.Name != "working" {
+		t.Fatalf("ActiveProfile() = (%d, %q), want (1, working)", idx, profile.Name)
+	}
+}
+
+func TestManagerEnforcesMaxConcurrentStreams(t *testing.T) {
+	left, right := net.Pipe()
+	defer left.Close()
+	defer right.Close()
+
+	client := NewManager(ManagerConfig{MaxConcurrentStreams: 1})
+	client.newSession = func(context.Context, Config) (managerSession, error) {
+		return &fakeManagerSession{open: left}, nil
+	}
+	defer client.Close()
+
+	server := NewManager(ManagerConfig{Server: true})
+	server.newSession = func(context.Context, Config) (managerSession, error) {
+		return &fakeManagerSession{accept: right}, nil
+	}
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, _ := server.AcceptStream(ctx)
+		accepted <- conn
+	}()
+
+	first, err := client.OpenStream(ctx)
+	if err != nil {
+		t.Fatalf("first OpenStream() error = %v", err)
+	}
+	defer first.Close()
+	serverConn := <-accepted
+	defer serverConn.Close()
+
+	shortCtx, shortCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer shortCancel()
+	_, err = client.OpenStream(shortCtx)
+	if !errors.Is(err, ErrManagerStreamLimit) {
+		t.Fatalf("second OpenStream() error = %v, want %v", err, ErrManagerStreamLimit)
 	}
 }

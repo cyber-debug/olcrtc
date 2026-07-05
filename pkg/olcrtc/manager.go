@@ -12,24 +12,36 @@ import (
 )
 
 var ErrManagerClosed = errors.New("olcrtc: manager closed")
+var ErrManagerStreamLimit = errors.New("olcrtc: manager stream limit reached")
+
+const (
+	defaultMaxConcurrentStreams = 128
+)
 
 // ManagerState describes the lifecycle stage of a persistent olcRTC carrier.
 type ManagerState string
 
 const (
-	ManagerStateIdle       ManagerState = "idle"
-	ManagerStateConnecting ManagerState = "connecting"
-	ManagerStateMuxReady   ManagerState = "mux_ready"
-	ManagerStateFailed     ManagerState = "failed"
-	ManagerStateClosed     ManagerState = "closed"
+	ManagerStateIdle         ManagerState = "idle"
+	ManagerStateConnecting   ManagerState = "connecting"
+	ManagerStateMuxReady     ManagerState = "mux_ready"
+	ManagerStateReconnecting ManagerState = "reconnecting"
+	ManagerStateFailed       ManagerState = "failed"
+	ManagerStateClosed       ManagerState = "closed"
 )
+
+// ProfileConfig configures one carrier profile. Managers try profiles in order
+// and move new streams to the next profile after a failed carrier setup.
+type ProfileConfig = Config
 
 // ManagerConfig configures a persistent carrier session. When Server is true,
 // the manager builds a server-side smux session and AcceptStream receives
 // streams from the peer. Otherwise OpenStream opens client-side streams.
 type ManagerConfig struct {
-	Session Config
-	Server  bool
+	Session              Config
+	Profiles             []ProfileConfig
+	Server               bool
+	MaxConcurrentStreams int
 }
 
 type managerSession interface {
@@ -48,15 +60,26 @@ type Manager struct {
 	session    managerSession
 	raw        net.Conn
 	mux        *smux.Session
+	profileIdx int
+	streams    chan struct{}
 	newSession func(context.Context, Config) (managerSession, error)
 }
 
 // NewManager creates a persistent carrier manager. The carrier is established
 // lazily when OpenStream or AcceptStream is first called.
 func NewManager(cfg ManagerConfig) *Manager {
+	maxStreams := cfg.MaxConcurrentStreams
+	if maxStreams == 0 {
+		maxStreams = defaultMaxConcurrentStreams
+	}
+	var streams chan struct{}
+	if maxStreams > 0 {
+		streams = make(chan struct{}, maxStreams)
+	}
 	return &Manager{
-		cfg:   cfg,
-		state: ManagerStateIdle,
+		cfg:     cfg,
+		state:   ManagerStateIdle,
+		streams: streams,
 		newSession: func(ctx context.Context, cfg Config) (managerSession, error) {
 			return New(ctx, cfg)
 		},
@@ -65,26 +88,37 @@ func NewManager(cfg ManagerConfig) *Manager {
 
 // OpenStream opens one ordered reliable stream over the persistent carrier.
 func (m *Manager) OpenStream(ctx context.Context) (net.Conn, error) {
+	release, err := m.acquireStream(ctx)
+	if err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	mux, err := m.readyMuxLocked(ctx)
 	m.mu.Unlock()
 	if err != nil {
+		release()
 		return nil, err
 	}
 	stream, err := mux.OpenStream()
 	if err != nil {
+		release()
 		m.resetMux(mux)
 		return nil, fmt.Errorf("olcrtc: open manager stream: %w", err)
 	}
-	return stream, nil
+	return &managedConn{Conn: stream, release: release}, nil
 }
 
 // AcceptStream accepts one ordered reliable stream over the persistent carrier.
 func (m *Manager) AcceptStream(ctx context.Context) (net.Conn, error) {
+	release, err := m.acquireStream(ctx)
+	if err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	mux, err := m.readyMuxLocked(ctx)
 	m.mu.Unlock()
 	if err != nil {
+		release()
 		return nil, err
 	}
 
@@ -101,11 +135,14 @@ func (m *Manager) AcceptStream(ctx context.Context) (net.Conn, error) {
 	select {
 	case res := <-done:
 		if res.err != nil {
+			release()
 			m.resetMux(mux)
 			return nil, fmt.Errorf("olcrtc: accept manager stream: %w", res.err)
 		}
-		return res.conn, nil
+		return &managedConn{Conn: res.conn, release: release}, nil
 	case <-ctx.Done():
+		release()
+		m.resetMux(mux)
 		return nil, fmt.Errorf("olcrtc: accept manager stream context: %w", ctx.Err())
 	}
 }
@@ -125,6 +162,13 @@ func (m *Manager) State() ManagerState {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.state
+}
+
+// ActiveProfile returns the profile currently backing the persistent carrier.
+func (m *Manager) ActiveProfile() (int, Config) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.profileIdx, m.profileLocked(m.profileIdx)
 }
 
 // Close tears down the active mux, carrier connection, and olcRTC session.
@@ -152,8 +196,31 @@ func (m *Manager) connectLocked(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("olcrtc: manager context: %w", err)
 	}
-	m.state = ManagerStateConnecting
-	sess, err := m.newSession(ctx, m.cfg.Session)
+	if m.state == ManagerStateFailed {
+		m.state = ManagerStateReconnecting
+	} else {
+		m.state = ManagerStateConnecting
+	}
+
+	profileCount := m.profileCountLocked()
+	var lastErr error
+	for attempt := 0; attempt < profileCount; attempt++ {
+		idx := (m.profileIdx + attempt) % profileCount
+		if err := m.connectProfileLocked(ctx, idx); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("olcrtc: no manager profiles configured")
+	}
+	return lastErr
+}
+
+func (m *Manager) connectProfileLocked(ctx context.Context, idx int) error {
+	cfg := m.profileLocked(idx)
+	sess, err := m.newSession(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("olcrtc: create manager session: %w", err)
 	}
@@ -184,6 +251,7 @@ func (m *Manager) connectLocked(ctx context.Context) error {
 	m.session = sess
 	m.raw = raw
 	m.mux = mux
+	m.profileIdx = idx
 	m.state = ManagerStateMuxReady
 	return nil
 }
@@ -216,5 +284,49 @@ func (m *Manager) closeLocked(next ManagerState) error {
 		m.session = nil
 	}
 	m.state = next
+	return err
+}
+
+func (m *Manager) profileCountLocked() int {
+	if len(m.cfg.Profiles) > 0 {
+		return len(m.cfg.Profiles)
+	}
+	return 1
+}
+
+func (m *Manager) profileLocked(idx int) Config {
+	if len(m.cfg.Profiles) == 0 {
+		return m.cfg.Session
+	}
+	if idx < 0 || idx >= len(m.cfg.Profiles) {
+		return m.cfg.Profiles[0]
+	}
+	return Config(m.cfg.Profiles[idx])
+}
+
+func (m *Manager) acquireStream(ctx context.Context) (func(), error) {
+	if m.streams == nil {
+		return func() {}, nil
+	}
+	select {
+	case m.streams <- struct{}{}:
+		var once sync.Once
+		return func() {
+			once.Do(func() { <-m.streams })
+		}, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("%w: %w", ErrManagerStreamLimit, ctx.Err())
+	}
+}
+
+type managedConn struct {
+	net.Conn
+	release func()
+	once    sync.Once
+}
+
+func (c *managedConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.release)
 	return err
 }
