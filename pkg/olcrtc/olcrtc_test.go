@@ -21,9 +21,12 @@ const (
 // --- stub engine ---
 
 type stubSession struct {
-	connected  bool
-	onEnded    func(string)
-	watchBlock chan struct{} // closed to unblock WatchConnection
+	connected       bool
+	onEnded         func(string)
+	watchBlock      chan struct{} // closed to unblock WatchConnection
+	caps            engine.Capabilities
+	datagramCanSend bool
+	sentDatagrams   [][]byte
 }
 
 func newStubSession() *stubSession { return &stubSession{watchBlock: make(chan struct{})} }
@@ -40,13 +43,25 @@ func (s *stubSession) GetSendQueue() chan []byte                        { return
 func (s *stubSession) GetBufferedAmount() uint64                        { return 0 }
 func (s *stubSession) Reconnect(_ string)                               {}
 func (s *stubSession) Capabilities() engine.Capabilities {
+	if s.caps != (engine.Capabilities{}) {
+		return s.caps
+	}
 	return engine.Capabilities{ByteStream: true}
 }
 func (s *stubSession) SubscriberCanSend() bool { return s.connected }
+func (s *stubSession) SendDatagram(data []byte) error {
+	copied := make([]byte, len(data))
+	copy(copied, data)
+	s.sentDatagrams = append(s.sentDatagrams, copied)
+	return nil
+}
+func (s *stubSession) DatagramCanSend() bool { return s.datagramCanSend }
 
 // Compile-time check: stubSession must satisfy engine.Session.
 var _ engine.Session = (*stubSession)(nil)
 var _ transportapi.Dialer = (*olcrtc.Session)(nil)
+var _ transportapi.DatagramSender = (*olcrtc.Session)(nil)
+var _ transportapi.DatagramReceiver = (*olcrtc.Session)(nil)
 
 func registerStubEngine(t *testing.T, name string) {
 	t.Helper()
@@ -275,6 +290,124 @@ func TestSessionCapabilities(t *testing.T) {
 	}
 	if caps.LossyDatagrams {
 		t.Fatalf("Capabilities().LossyDatagrams = true, want false for stub")
+	}
+}
+
+func TestSessionDatagramSendReceive(t *testing.T) {
+	stub := newStubSession()
+	stub.caps = engine.Capabilities{ByteStream: true, Datagram: true}
+	stub.datagramCanSend = true
+	var engineCfg engine.Config
+	engine.Register("stub-datagram", func(_ context.Context, cfg engine.Config) (engine.Session, error) {
+		engineCfg = cfg
+		return stub, nil
+	})
+
+	var callbackPayload []byte
+	sess, err := olcrtc.New(context.Background(), olcrtc.Config{
+		Engine:         "stub-datagram",
+		URL:            stubURL,
+		Token:          stubToken,
+		DatagramBuffer: 1,
+		OnDatagram: func(data []byte) {
+			callbackPayload = data
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := sess.SendDatagram(context.Background(), []byte("out")); err != nil {
+		t.Fatalf("SendDatagram() error = %v", err)
+	}
+	if len(stub.sentDatagrams) != 1 || string(stub.sentDatagrams[0]) != "out" {
+		t.Fatalf("sent datagrams = %q", stub.sentDatagrams)
+	}
+
+	raw := []byte("in")
+	engineCfg.OnDatagram(raw)
+	raw[0] = 'X'
+	got, err := sess.ReceiveDatagram(context.Background())
+	if err != nil {
+		t.Fatalf("ReceiveDatagram() error = %v", err)
+	}
+	if string(got) != "in" {
+		t.Fatalf("ReceiveDatagram() = %q, want in", got)
+	}
+	if string(callbackPayload) != "in" {
+		t.Fatalf("OnDatagram payload = %q, want in", callbackPayload)
+	}
+}
+
+func TestSessionDatagramRejectsOversize(t *testing.T) {
+	stub := newStubSession()
+	stub.caps = engine.Capabilities{ByteStream: true, Datagram: true}
+	stub.datagramCanSend = true
+	registerStubEngineControlled(t, "stub-datagram-oversize", stub)
+
+	sess, err := olcrtc.New(context.Background(), olcrtc.Config{
+		Engine: "stub-datagram-oversize",
+		URL:    stubURL,
+		Token:  stubToken,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	payload := make([]byte, transportapi.MaxDatagramPayload+1)
+	if err := sess.SendDatagram(context.Background(), payload); !errors.Is(err, olcrtc.ErrDatagramTooLarge) {
+		t.Fatalf("SendDatagram(oversize) error = %v, want %v", err, olcrtc.ErrDatagramTooLarge)
+	}
+}
+
+func TestSessionDatagramUnsupportedWhenNotSendable(t *testing.T) {
+	stub := newStubSession()
+	registerStubEngineControlled(t, "stub-datagram-unsupported", stub)
+
+	sess, err := olcrtc.New(context.Background(), olcrtc.Config{
+		Engine: "stub-datagram-unsupported",
+		URL:    stubURL,
+		Token:  stubToken,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := sess.SendDatagram(context.Background(), []byte("x")); !errors.Is(err, engine.ErrDatagramUnsupported) {
+		t.Fatalf("SendDatagram(unsupported) error = %v, want %v", err, engine.ErrDatagramUnsupported)
+	}
+}
+
+func TestSessionDatagramQueueDropsWhenFull(t *testing.T) {
+	var engineCfg engine.Config
+	engine.Register("stub-datagram-drop", func(_ context.Context, cfg engine.Config) (engine.Session, error) {
+		engineCfg = cfg
+		return newStubSession(), nil
+	})
+
+	sess, err := olcrtc.New(context.Background(), olcrtc.Config{
+		Engine:         "stub-datagram-drop",
+		URL:            stubURL,
+		Token:          stubToken,
+		DatagramBuffer: 1,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	engineCfg.OnDatagram([]byte("first"))
+	engineCfg.OnDatagram([]byte("second"))
+	got, err := sess.ReceiveDatagram(context.Background())
+	if err != nil {
+		t.Fatalf("ReceiveDatagram(first) error = %v", err)
+	}
+	if string(got) != "first" {
+		t.Fatalf("ReceiveDatagram(first) = %q, want first", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if got, err := sess.ReceiveDatagram(ctx); err == nil {
+		t.Fatalf("ReceiveDatagram(second) = %q, want timeout after drop", got)
 	}
 }
 

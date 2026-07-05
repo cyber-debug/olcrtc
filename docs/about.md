@@ -181,7 +181,7 @@ Active smux streams do not migrate when the profile changes. New connections can
 | `pkg/olcrtc` | embeddable client/engine API |
 | `pkg/olcrtc/tunnel` | embeddable server tunnel API |
 | `pkg/olcrtc/transportapi` | stable transport interfaces, capabilities, datagram contract, metrics |
-| `pkg/olcrtc/vless` | minimal VLESS TCP adapter over an olcrtc reliable stream |
+| `pkg/olcrtc/vless` | minimal VLESS TCP/UDP adapter over olcrtc streams and datagrams |
 | `mobile` | gomobile bindings for Android |
 | `internal/config` | YAML parsing, `crypto.key_file` |
 | `internal/app/session` | defaults, validation, routing into `srv`/`cnc`/`gen` |
@@ -224,17 +224,20 @@ if err != nil {
 conn, err := sess.Dial(ctx)
 ```
 
-For protocol integrations, `Session` also satisfies `transportapi.Dialer`:
+For protocol integrations, `Session` also satisfies `transportapi.Dialer`,
+`transportapi.DatagramSender`, and `transportapi.DatagramReceiver`:
 
 ```go
 stream, err := sess.OpenStream(ctx)
 caps := sess.Capabilities()
+err = sess.SendDatagram(ctx, []byte("payload"))
 ```
 
 The `pkg/olcrtc/vless` adapter keeps olcrtc as a transport. It implements
 minimal VLESS TCP request/response framing over one reliable olcrtc stream per
-request; it does not replace Xray-core and is not a drop-in transport for
-existing Xray/Happ clients until those clients learn the olcrtc transport.
+request and authenticated VLESS UDP packet framing over olcrtc datagrams. It
+does not replace Xray-core and is not a drop-in transport for existing
+Xray/Happ clients until those clients learn the olcrtc transport.
 
 `pkg/olcrtc/tunnel` embeds the server side and exposes hooks:
 

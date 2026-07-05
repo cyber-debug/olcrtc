@@ -49,7 +49,11 @@ var (
 	ErrRoomCreationUnsupported = errors.New("olcrtc: auth provider does not support room creation")
 	// ErrSessionEnded is returned from Read/Write when the session has ended permanently.
 	ErrSessionEnded = errors.New("olcrtc: session ended")
+	// ErrDatagramTooLarge is returned when a lossy datagram exceeds the public transport contract.
+	ErrDatagramTooLarge = errors.New("olcrtc: datagram too large")
 )
+
+const defaultDatagramBuffer = 64
 
 // Config is the input to [New].
 type Config struct {
@@ -74,6 +78,14 @@ type Config struct {
 	// ProxyAddr / ProxyPort configure an outbound SOCKS5 proxy.
 	ProxyAddr string
 	ProxyPort int
+
+	// DatagramBuffer is the inbound lossy datagram queue size. Values <= 0 use
+	// a small default. When the queue is full, new datagrams are dropped.
+	DatagramBuffer int
+	// OnDatagram is called for each inbound unordered/lossy datagram.
+	OnDatagram func([]byte)
+	// OnPeerDatagram is called when an engine reports the sending peer.
+	OnPeerDatagram func(peerID string, data []byte)
 }
 
 // Session is the library handle returned by [New].
@@ -84,6 +96,7 @@ type Session struct {
 	pw           *io.PipeWriter
 	authProvider auth.Provider
 	authCfg      auth.Config
+	datagrams    chan []byte
 }
 
 // RegisterDefaults registers all built-in engines and auth providers.
@@ -122,16 +135,19 @@ func newWithAuth(ctx context.Context, cfg Config) (*Session, error) {
 	}
 
 	pr, pw := io.Pipe()
+	datagrams := make(chan []byte, datagramBufferSize(cfg.DatagramBuffer))
 	engineName := p.Engine()
 	sess, err := engine.New(ctx, engineName, engine.Config{
-		URL:       creds.URL,
-		Token:     creds.Token,
-		Name:      cfg.Name,
-		Extra:     creds.Extra,
-		OnData:    func(data []byte) { _, _ = pw.Write(data) },
-		DNSServer: cfg.DNSServer,
-		ProxyAddr: cfg.ProxyAddr,
-		ProxyPort: cfg.ProxyPort,
+		URL:            creds.URL,
+		Token:          creds.Token,
+		Name:           cfg.Name,
+		Extra:          creds.Extra,
+		OnData:         func(data []byte) { _, _ = pw.Write(data) },
+		OnDatagram:     func(data []byte) { enqueueDatagram(datagrams, cfg.OnDatagram, data) },
+		OnPeerDatagram: func(peerID string, data []byte) { enqueuePeerDatagram(datagrams, cfg.OnPeerDatagram, peerID, data) },
+		DNSServer:      cfg.DNSServer,
+		ProxyAddr:      cfg.ProxyAddr,
+		ProxyPort:      cfg.ProxyPort,
 		Refresh: func(rCtx context.Context) (engine.Credentials, error) {
 			fresh, freshErr := p.Issue(rCtx, authCfg)
 			if freshErr != nil {
@@ -145,7 +161,7 @@ func newWithAuth(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, fmt.Errorf("olcrtc: engine %q: %w", engineName, err)
 	}
 
-	return &Session{inner: sess, pr: pr, pw: pw, authProvider: p, authCfg: authCfg}, nil
+	return &Session{inner: sess, pr: pr, pw: pw, authProvider: p, authCfg: authCfg, datagrams: datagrams}, nil
 }
 
 func newDirect(ctx context.Context, cfg Config) (*Session, error) {
@@ -162,21 +178,24 @@ func newDirect(ctx context.Context, cfg Config) (*Session, error) {
 	}
 
 	pr, pw := io.Pipe()
+	datagrams := make(chan []byte, datagramBufferSize(cfg.DatagramBuffer))
 	sess, err := engine.New(ctx, engineName, engine.Config{
-		URL:       cfg.URL,
-		Token:     cfg.Token,
-		Name:      cfg.Name,
-		OnData:    func(data []byte) { _, _ = pw.Write(data) },
-		DNSServer: cfg.DNSServer,
-		ProxyAddr: cfg.ProxyAddr,
-		ProxyPort: cfg.ProxyPort,
+		URL:            cfg.URL,
+		Token:          cfg.Token,
+		Name:           cfg.Name,
+		OnData:         func(data []byte) { _, _ = pw.Write(data) },
+		OnDatagram:     func(data []byte) { enqueueDatagram(datagrams, cfg.OnDatagram, data) },
+		OnPeerDatagram: func(peerID string, data []byte) { enqueuePeerDatagram(datagrams, cfg.OnPeerDatagram, peerID, data) },
+		DNSServer:      cfg.DNSServer,
+		ProxyAddr:      cfg.ProxyAddr,
+		ProxyPort:      cfg.ProxyPort,
 	})
 	if err != nil {
 		_ = pw.CloseWithError(err)
 		return nil, fmt.Errorf("olcrtc: engine %q: %w", engineName, err)
 	}
 
-	return &Session{inner: sess, pr: pr, pw: pw}, nil
+	return &Session{inner: sess, pr: pr, pw: pw, datagrams: datagrams}, nil
 }
 
 // Dial connects and returns a [net.Conn] backed by the WebRTC data channel.
@@ -211,6 +230,38 @@ func (s *Session) Capabilities() transportapi.Capabilities {
 	return caps
 }
 
+// SendDatagram sends one unordered/lossy datagram when the selected engine
+// supports a datagram path.
+func (s *Session) SendDatagram(ctx context.Context, payload []byte) error {
+	if len(payload) > transportapi.MaxDatagramPayload {
+		return ErrDatagramTooLarge
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("send datagram context: %w", err)
+	}
+	dg, ok := s.inner.(engine.DatagramSession)
+	if !ok {
+		return engine.ErrDatagramUnsupported
+	}
+	if !dg.DatagramCanSend() {
+		return engine.ErrDatagramUnsupported
+	}
+	if err := dg.SendDatagram(payload); err != nil {
+		return fmt.Errorf("send datagram: %w", err)
+	}
+	return nil
+}
+
+// ReceiveDatagram waits for one inbound unordered/lossy datagram.
+func (s *Session) ReceiveDatagram(ctx context.Context) ([]byte, error) {
+	select {
+	case payload := <-s.datagrams:
+		return payload, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("receive datagram context: %w", ctx.Err())
+	}
+}
+
 // Connect establishes the WebRTC connection. Blocks until the data channel (or
 // media) is ready, or ctx is cancelled.
 func (s *Session) Connect(ctx context.Context) error {
@@ -226,6 +277,40 @@ func (s *Session) Send(data []byte) error {
 		return fmt.Errorf("send: %w", err)
 	}
 	return nil
+}
+
+func datagramBufferSize(size int) int {
+	if size > 0 {
+		return size
+	}
+	return defaultDatagramBuffer
+}
+
+func enqueuePeerDatagram(queue chan<- []byte, cb func(peerID string, data []byte), peerID string, data []byte) {
+	if cb != nil {
+		cb(peerID, cloneBytes(data))
+	}
+	enqueueDatagram(queue, nil, data)
+}
+
+func enqueueDatagram(queue chan<- []byte, cb func([]byte), data []byte) {
+	payload := cloneBytes(data)
+	if cb != nil {
+		cb(cloneBytes(payload))
+	}
+	select {
+	case queue <- payload:
+	default:
+	}
+}
+
+func cloneBytes(data []byte) []byte {
+	if len(data) == 0 {
+		return nil
+	}
+	out := make([]byte, len(data))
+	copy(out, data)
+	return out
 }
 
 // Close tears down the session and releases all resources.

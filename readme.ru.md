@@ -13,7 +13,7 @@
 
 # olcRTC
 
-`olcRTC` (OpenLibreCommunity RTC) - зашифрованный TCP-over-WebRTC туннель. Трафик маскируется под обычный видеозвонок на разрешённых сервисах (Jitsi, Yandex Telemost, WbStream). Внутри - шифрование XChaCha20-Poly1305 и мультиплексирование smux поверх WebRTC data/video каналов.
+`olcRTC` (OpenLibreCommunity RTC) - зашифрованный TCP/UDP-over-WebRTC туннель. Трафик маскируется под обычный видеозвонок на разрешённых сервисах (Jitsi, Yandex Telemost, WbStream). Внутри - шифрование XChaCha20-Poly1305 и мультиплексирование smux поверх WebRTC data/video каналов.
 
 Статус: **Beta**
 
@@ -28,6 +28,7 @@ app -> SOCKS5 -> olcrtc cnc -> WebRTC/SFU сервис -> olcrtc srv -> инте
 - **Провайдеры:** `jitsi`, `telemost`, `wbstream`
 - **Транспорты:** `datachannel`, `vp8channel`, `seichannel`, `videochannel`
 - **Платформы:** Linux, macOS, Windows, Android (gomobile), встраиваемая Go-библиотека
+- **Встраиваемый protocol layer:** публичный stream/datagram transport API с основой VLESS TCP/UDP adapter
 
 Рекомендуемый старт: `jitsi + datachannel`.
 

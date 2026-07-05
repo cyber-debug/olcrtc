@@ -3,6 +3,7 @@ package vless
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -11,10 +12,15 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	testHostName = "example.com"
+	testEchoHost = "echo.local"
+)
+
 func TestRequestRoundTrip(t *testing.T) {
 	testUserID := vlessTestUserID()
 	var b bytes.Buffer
-	want := Request{UserID: testUserID, Command: CommandTCP, Host: "example.com", Port: 443}
+	want := Request{UserID: testUserID, Command: CommandTCP, Host: testHostName, Port: 443}
 	if err := WriteRequest(&b, want); err != nil {
 		t.Fatalf("WriteRequest() error = %v", err)
 	}
@@ -24,6 +30,22 @@ func TestRequestRoundTrip(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("ReadRequest() = %+v, want %+v", got, want)
+	}
+}
+
+func TestReadRequestRejectsUnauthorizedUser(t *testing.T) {
+	var b bytes.Buffer
+	if err := WriteRequest(&b, Request{
+		UserID:  vlessTestUserID(),
+		Command: CommandTCP,
+		Host:    testHostName,
+		Port:    443,
+	}); err != nil {
+		t.Fatalf("WriteRequest() error = %v", err)
+	}
+	_, err := ReadRequest(&b, map[uuid.UUID]struct{}{uuid.New(): {}})
+	if !errors.Is(err, ErrUnauthorizedUser) {
+		t.Fatalf("ReadRequest(unauthorized) error = %v, want %v", err, ErrUnauthorizedUser)
 	}
 }
 
@@ -46,7 +68,7 @@ func TestAdapterTCPEcho(t *testing.T) {
 	go func() {
 		clientErr <- ClientTCP(ctx, localClient, clientTransport, Request{
 			UserID: testUserID,
-			Host:   "echo.local",
+			Host:   testEchoHost,
 			Port:   443,
 		})
 	}()
