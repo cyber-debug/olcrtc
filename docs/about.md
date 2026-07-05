@@ -177,6 +177,7 @@ Active smux streams do not migrate when the profile changes. New connections can
 | Path | What is inside |
 |---|---|
 | `cmd/olcrtc` | CLI entrypoint |
+| `cmd/olcrtc-vless` | experimental SOCKS5 TCP bridge for VLESS-over-olcrtc |
 | `cmd/olcrtc-cgo` | c-shared entrypoint |
 | `pkg/olcrtc` | embeddable client/engine API |
 | `pkg/olcrtc/tunnel` | embeddable server tunnel API |
@@ -312,3 +313,4 @@ E2E_CARRIERS=wbstream E2E_TRANSPORTS= vp8channel mage e2e
 - [Compatibility matrix](settings.md)
 - [URI format](uri.md)
 - [Subscription format](sub.md)
+- [VLESS over olcrtc](vless.ru.md)

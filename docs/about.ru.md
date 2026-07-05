@@ -177,6 +177,7 @@ data: data
 | Путь | Что внутри |
 |---|---|
 | `cmd/olcrtc` | CLI entrypoint |
+| `cmd/olcrtc-vless` | экспериментальный SOCKS5 TCP bridge для VLESS-over-olcrtc |
 | `cmd/olcrtc-cgo` | c-shared entrypoint |
 | `pkg/olcrtc` | embeddable client/engine API |
 | `pkg/olcrtc/tunnel` | embeddable server tunnel API |
@@ -313,3 +314,4 @@ E2E_CARRIERS=wbstream E2E_TRANSPORTS= vp8channel mage e2e
 - [Матрица совместимости](settings.ru.md)
 - [URI формат](uri.ru.md)
 - [Формат подписки](sub.ru.md)
+- [VLESS over olcrtc](vless.ru.md)
