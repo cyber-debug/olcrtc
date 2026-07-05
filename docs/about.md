@@ -225,12 +225,17 @@ conn, err := sess.Dial(ctx)
 ```
 
 For protocol integrations, `Session` also satisfies `transportapi.Dialer`,
-`transportapi.DatagramSender`, and `transportapi.DatagramReceiver`:
+`transportapi.Listener`, `transportapi.DatagramSender`,
+`transportapi.DatagramReceiver`, `transportapi.PeerDatagramSender`, and
+`transportapi.PeerDatagramReceiver`:
 
 ```go
 stream, err := sess.OpenStream(ctx)
+accepted, err := sess.AcceptStream(ctx)
 caps := sess.Capabilities()
 err = sess.SendDatagram(ctx, []byte("payload"))
+err = sess.SendDatagramTo(ctx, "peer-id", []byte("payload"))
+metrics := sess.Metrics()
 ```
 
 The `pkg/olcrtc/vless` adapter keeps olcrtc as a transport. It implements
@@ -238,6 +243,11 @@ minimal VLESS TCP request/response framing over one reliable olcrtc stream per
 request and authenticated VLESS UDP packet framing over olcrtc datagrams. It
 does not replace Xray-core and is not a drop-in transport for existing
 Xray/Happ clients until those clients learn the olcrtc transport.
+
+`AcceptStream` exposes the same single reliable session stream as `OpenStream`;
+the current public API does not yet expose independent multi-accept streams.
+Inbound datagrams use a bounded lossy queue: when the consumer is too slow,
+new datagrams are dropped and `Metrics().DatagramDrops` is incremented.
 
 `pkg/olcrtc/tunnel` embeds the server side and exposes hooks:
 

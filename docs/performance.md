@@ -40,7 +40,7 @@ For end-to-end SOCKS5 UDP validation, run the memory-provider test when the
 host has enough CPU headroom:
 
 ```bash
-go test -count=1 -run '^TestClientServerSOCKSUDPOverMemoryVP8Channel$' ./internal/e2e
+go test -count=1 -run '^TestClientServerSOCKSUDPOverMemoryDatachannel$' ./internal/e2e
 ```
 
 For broader transport changes, prefer the package-local tests first, then the

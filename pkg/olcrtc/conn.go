@@ -31,10 +31,11 @@ func (c *conn) Write(b []byte) (int, error) {
 }
 
 func (c *conn) Close() error {
-	_ = c.s.pw.CloseWithError(net.ErrClosed)
+	c.s.endSession(net.ErrClosed)
 	if err := c.s.inner.Close(); err != nil {
 		return fmt.Errorf("close: %w", err)
 	}
+	c.s.counters.StreamClosed()
 	return nil
 }
 

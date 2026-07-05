@@ -60,6 +60,24 @@ type DatagramReceiver interface {
 	ReceiveDatagram(ctx context.Context) ([]byte, error)
 }
 
+// PeerDatagram is one unordered lossy datagram with optional peer identity.
+type PeerDatagram struct {
+	PeerID  string
+	Payload []byte
+}
+
+// PeerDatagramSender sends unordered lossy datagrams to a specific peer when
+// the underlying transport can address peers.
+type PeerDatagramSender interface {
+	SendDatagramTo(ctx context.Context, peerID string, payload []byte) error
+}
+
+// PeerDatagramReceiver receives unordered lossy datagrams with peer identity
+// when the underlying transport reports it.
+type PeerDatagramReceiver interface {
+	ReceivePeerDatagram(ctx context.Context) (PeerDatagram, error)
+}
+
 // Metrics is a point-in-time transport snapshot.
 type Metrics struct {
 	OpenedStreams   uint64

@@ -242,8 +242,10 @@ func (r *memoryRoom) isFirstStream(s *memoryStream) bool {
 }
 
 type memoryStream struct {
-	room   *memoryRoom
-	onData func([]byte)
+	room           *memoryRoom
+	onData         func([]byte)
+	onDatagram     func([]byte)
+	onPeerDatagram func(peerID string, data []byte)
 
 	mu        sync.Mutex
 	connected bool
@@ -340,6 +342,31 @@ func (s *memoryStream) Send(data []byte) error {
 	return nil
 }
 
+func (s *memoryStream) SendDatagram(data []byte) error {
+	if !s.canDeliver() {
+		return io.ErrClosedPipe
+	}
+	payload := append([]byte(nil), data...)
+	for _, peer := range s.peers() {
+		peer.deliverDatagram("", payload)
+	}
+	return nil
+}
+
+func (s *memoryStream) SendDatagramTo(peerID string, data []byte) error {
+	if !s.canDeliver() {
+		return io.ErrClosedPipe
+	}
+	peer := s.peerByID(peerID)
+	if peer == nil {
+		return io.ErrClosedPipe
+	}
+	peer.deliverDatagram(s.peerID(), data)
+	return nil
+}
+
+func (s *memoryStream) DatagramCanSend() bool { return s.canDeliver() }
+
 func (s *memoryStream) deliver(data []byte) {
 	s.mu.Lock()
 	if !s.connected && !s.closed {
@@ -352,6 +379,25 @@ func (s *memoryStream) deliver(data []byte) {
 	s.mu.Unlock()
 	if ready {
 		onData(append([]byte(nil), data...))
+	}
+}
+
+func (s *memoryStream) deliverDatagram(peerID string, data []byte) {
+	s.mu.Lock()
+	ready := !s.closed && s.connected
+	onDatagram := s.onDatagram
+	onPeerDatagram := s.onPeerDatagram
+	s.mu.Unlock()
+	if !ready {
+		return
+	}
+	payload := append([]byte(nil), data...)
+	if peerID != "" && onPeerDatagram != nil {
+		onPeerDatagram(peerID, payload)
+		return
+	}
+	if onDatagram != nil {
+		onDatagram(payload)
 	}
 }
 
@@ -399,7 +445,7 @@ func (s *memoryStream) GetSendQueue() chan []byte { return nil }
 func (s *memoryStream) GetBufferedAmount() uint64 { return 0 }
 func (s *memoryStream) Reconnect(string)          {}
 func (s *memoryStream) Capabilities() engine.Capabilities {
-	return engine.Capabilities{ByteStream: true, VideoTrack: true}
+	return engine.Capabilities{ByteStream: true, VideoTrack: true, Datagram: true}
 }
 
 func (s *memoryStream) AddVideoTrack(track webrtc.TrackLocal) error {
@@ -617,6 +663,39 @@ func (s *memoryStream) isConnected() bool {
 	return s.connected && !s.closed
 }
 
+func (s *memoryStream) canDeliver() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.connected && !s.closed && !s.blackhole
+}
+
+func (s *memoryStream) peerID() string {
+	return fmt.Sprintf("%p", s)
+}
+
+func (s *memoryStream) peers() []*memoryStream {
+	s.room.mu.Lock()
+	defer s.room.mu.Unlock()
+	peers := make([]*memoryStream, 0, len(s.room.streams))
+	for peer := range s.room.streams {
+		if peer != s {
+			peers = append(peers, peer)
+		}
+	}
+	return peers
+}
+
+func (s *memoryStream) peerByID(peerID string) *memoryStream {
+	s.room.mu.Lock()
+	defer s.room.mu.Unlock()
+	for peer := range s.room.streams {
+		if peer.peerID() == peerID {
+			return peer
+		}
+	}
+	return nil
+}
+
 func (s *memoryStream) triggerReconnect() {
 	s.mu.Lock()
 	reconnect := s.reconnect
@@ -644,7 +723,7 @@ func registerMemoryCarrier(t *testing.T) (string, *memoryRoom) {
 	name := "e2e-memory-" + t.Name()
 	room := &memoryRoom{streams: make(map[*memoryStream]struct{})}
 	enginebuiltin.Register(name, func(_ context.Context, cfg enginebuiltin.Config) (engine.Session, error) {
-		stream := newMemoryStream(room, cfg.OnData)
+		stream := newMemoryStream(room, cfg.OnData, cfg.OnDatagram, cfg.OnPeerDatagram)
 		room.mu.Lock()
 		room.streams[stream] = struct{}{}
 		room.mu.Unlock()
@@ -656,13 +735,20 @@ func registerMemoryCarrier(t *testing.T) (string, *memoryRoom) {
 // newMemoryStream builds a memoryStream with its own lifecycle context.
 // The context lives until Close, so async PC negotiation goroutines see
 // it stay alive past streamTransport.Connect's deferred cancel.
-func newMemoryStream(room *memoryRoom, onData func([]byte)) *memoryStream {
+func newMemoryStream(
+	room *memoryRoom,
+	onData func([]byte),
+	onDatagram func([]byte),
+	onPeerDatagram func(peerID string, data []byte),
+) *memoryStream {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &memoryStream{
-		room:         room,
-		onData:       onData,
-		streamCtx:    ctx,
-		streamCancel: cancel,
+		room:           room,
+		onData:         onData,
+		onDatagram:     onDatagram,
+		onPeerDatagram: onPeerDatagram,
+		streamCtx:      ctx,
+		streamCancel:   cancel,
 	}
 }
 
@@ -671,7 +757,7 @@ func registerMemoryCarrierAs(t *testing.T, name string) {
 
 	room := &memoryRoom{streams: make(map[*memoryStream]struct{})}
 	enginebuiltin.Register(name, func(_ context.Context, cfg enginebuiltin.Config) (engine.Session, error) {
-		stream := newMemoryStream(room, cfg.OnData)
+		stream := newMemoryStream(room, cfg.OnData, cfg.OnDatagram, cfg.OnPeerDatagram)
 		room.mu.Lock()
 		room.streams[stream] = struct{}{}
 		room.mu.Unlock()
@@ -1203,7 +1289,7 @@ func startMemoryTunnel(t *testing.T, transportName string, unsafeAllowPrivateUDP
 			TransportOptions: e2eTransportOptions(transportName),
 		}, func() { close(ready) })
 	}()
-	waitForReadyWithin(t, ready, 20*time.Second)
+	waitForReadyWithin(t, ready, memoryReadyBudget(transportName))
 
 	return &tunnelRuntime{
 		socksAddr: socksAddr,
@@ -1212,6 +1298,15 @@ func startMemoryTunnel(t *testing.T, transportName string, unsafeAllowPrivateUDP
 		serverErr: serverErr,
 		clientErr: clientErr,
 		stopWait:  3 * time.Second,
+	}
+}
+
+func memoryReadyBudget(transportName string) time.Duration {
+	switch transportName {
+	case transportVideo, transportSEI, transportVP8:
+		return 60 * time.Second
+	default:
+		return 20 * time.Second
 	}
 }
 
@@ -1713,9 +1808,9 @@ func TestClientServerSOCKSTunnelOverMemoryDatachannel(t *testing.T) {
 	}
 }
 
-func TestClientServerSOCKSUDPOverMemoryVP8Channel(t *testing.T) {
+func TestClientServerSOCKSUDPOverMemoryDatachannel(t *testing.T) {
 	echoAddr := startUDPEchoServer(t)
-	rt := startMemoryTunnel(t, transportVP8, true)
+	rt := startMemoryTunnel(t, transportData, true)
 	defer rt.stop(t)
 
 	udpConn, tcpConn, relayAddr := connectViaSOCKSUDP(t, rt.socksAddr)
