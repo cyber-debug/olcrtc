@@ -241,9 +241,11 @@ metrics := sess.Metrics()
 Адаптер `pkg/olcrtc/vless` оставляет olcrtc именно транспортом. Он реализует
 минимальный VLESS TCP request/response framing поверх одного reliable stream
 olcrtc на один request и authenticated VLESS UDP packet framing поверх datagrams
-olcrtc. Он не заменяет Xray-core и не является drop-in transport для
-существующих Xray/Happ clients, пока эти clients не научатся использовать
-transport olcrtc.
+olcrtc. `ServeUDP` запускает long-lived relay с associations на peer и target,
+idle expiry, лимитом associations, peer-addressed ответами там, где transport
+это умеет, и process-local relay metrics. Он не заменяет Xray-core и не
+является drop-in transport для существующих Xray/Happ clients, пока эти clients
+не научатся использовать transport olcrtc.
 
 `AcceptStream` открывает тот же single reliable session stream, что и
 `OpenStream`; текущий public API ещё не exposes independent multi-accept

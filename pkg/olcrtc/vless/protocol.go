@@ -49,8 +49,8 @@ var (
 	// ErrInvalidAddress is returned when a request target address cannot be encoded or decoded.
 	ErrInvalidAddress = errors.New("vless: invalid address")
 
-	// ErrUDPUnsupported is returned for VLESS UDP requests until datagram plumbing is implemented.
-	ErrUDPUnsupported = errors.New("vless: udp adapter not implemented")
+	// ErrUDPUnsupported is returned when a reliable VLESS stream request asks for UDP.
+	ErrUDPUnsupported = errors.New("vless: udp is datagram-only")
 )
 
 // Request is the VLESS request header.

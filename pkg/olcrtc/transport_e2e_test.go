@@ -10,12 +10,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	"github.com/openlibrecommunity/olcrtc/pkg/olcrtc"
+	"github.com/openlibrecommunity/olcrtc/pkg/olcrtc/vless"
 	"github.com/pion/webrtc/v4"
 )
 
-var errMemoryStreamPayloadMismatch = errors.New("memory stream payload mismatch")
+var (
+	errMemoryStreamPayloadMismatch = errors.New("memory stream payload mismatch")
+	errUnexpectedMemoryUDPTarget   = errors.New("unexpected memory udp target")
+)
+
+const memoryTestEchoHost = "echo.local"
 
 func TestSessionTransportOverMemoryEngine(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -44,6 +51,35 @@ func TestSessionTransportOverMemoryEngine(t *testing.T) {
 
 	assertMemoryStreamPayload(t, clientConn, serverConn)
 	assertMemoryPeerDatagrams(ctx, t, client, server)
+}
+
+func TestSessionVLESSUDPRelayOverMemoryEngine(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	engineName := registerMemoryEngine(t)
+	userID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+
+	server, err := olcrtc.New(ctx, olcrtc.Config{Engine: engineName, URL: stubURL, Token: stubToken})
+	if err != nil {
+		t.Fatalf("New(server) error = %v", err)
+	}
+	defer func() { _ = server.Close() }()
+	client, err := olcrtc.New(ctx, olcrtc.Config{Engine: engineName, URL: stubURL, Token: stubToken})
+	if err != nil {
+		t.Fatalf("New(client) error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+	if err := server.Connect(ctx); err != nil {
+		t.Fatalf("Connect(server) error = %v", err)
+	}
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect(client) error = %v", err)
+	}
+
+	relayCancel, errCh := startMemoryVLESSUDPRelay(ctx, server, userID)
+	defer relayCancel()
+	assertMemoryVLESSUDPRelay(ctx, t, client, userID)
+	stopMemoryVLESSUDPRelay(t, relayCancel, errCh)
 }
 
 func assertMemoryStreamPayload(t *testing.T, clientConn, serverConn net.Conn) {
@@ -233,6 +269,70 @@ func (s *memoryEngineSession) isConnected() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.connected && !s.closed
+}
+
+func memoryEchoUDPDial(_ context.Context, network, address string) (net.Conn, error) {
+	if network != "udp" || address != memoryTestEchoHost+":53" {
+		return nil, fmt.Errorf("%w: %s/%s", errUnexpectedMemoryUDPTarget, network, address)
+	}
+	left, right := net.Pipe()
+	go func() {
+		defer func() { _ = right.Close() }()
+		_, _ = io.Copy(right, right)
+	}()
+	return left, nil
+}
+
+func startMemoryVLESSUDPRelay(
+	ctx context.Context,
+	server *olcrtc.Session,
+	userID uuid.UUID,
+) (context.CancelFunc, <-chan error) {
+	relayCtx, relayCancel := context.WithCancel(ctx)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- vless.ServeUDP(
+			relayCtx,
+			server,
+			server,
+			map[uuid.UUID]struct{}{userID: {}},
+			memoryEchoUDPDial,
+			vless.UDPRelayConfig{TargetReadTimeout: 20 * time.Millisecond},
+		)
+	}()
+	return relayCancel, errCh
+}
+
+func assertMemoryVLESSUDPRelay(ctx context.Context, t *testing.T, client *olcrtc.Session, userID uuid.UUID) {
+	t.Helper()
+	if err := vless.SendUDPPacket(ctx, client, vless.UDPPacket{
+		UserID:  userID,
+		Host:    memoryTestEchoHost,
+		Port:    53,
+		Payload: []byte("relay"),
+	}); err != nil {
+		t.Fatalf("SendUDPPacket() error = %v", err)
+	}
+	got, err := vless.ReceiveUDPPacket(ctx, client, map[uuid.UUID]struct{}{userID: {}})
+	if err != nil {
+		t.Fatalf("ReceiveUDPPacket() error = %v", err)
+	}
+	if got.Host != memoryTestEchoHost || got.Port != 53 || string(got.Payload) != "relay" {
+		t.Fatalf("VLESS UDP relay response = %+v, want echo.local:53 relay", got)
+	}
+}
+
+func stopMemoryVLESSUDPRelay(t *testing.T, cancel context.CancelFunc, errCh <-chan error) {
+	t.Helper()
+	cancel()
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("ServeUDP() error = nil, want context cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ServeUDP() did not stop")
+	}
 }
 
 var (
