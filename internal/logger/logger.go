@@ -238,5 +238,8 @@ func shouldDropPionLog(scope, msg string) bool {
 	}
 	msg = strings.ToLower(msg)
 	return strings.Contains(msg, "refresh permissions") ||
-		strings.Contains(msg, "createpermission error response")
+		strings.Contains(msg, "createpermission error response") ||
+		(scope == "ice" &&
+			strings.Contains(msg, "failed to send packet:") &&
+			strings.Contains(msg, "sendto: operation not permitted"))
 }

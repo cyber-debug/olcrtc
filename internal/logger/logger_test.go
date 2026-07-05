@@ -91,6 +91,22 @@ func TestPionLoggerDropsTURNRefreshNoise(t *testing.T) {
 	}
 }
 
+func TestPionLoggerDropsICEPrivateCandidateSendNoise(t *testing.T) {
+	buf := captureLogs(t)
+
+	ice := NewPionLoggerFactory().NewLogger("ice")
+	ice.Infof("Failed to send packet: write udp 31.59.45.218:12345->10.111.0.12:10000: sendto: operation not permitted")
+	ice.Infof("Setting new connection state: Connected")
+
+	got := buf.String()
+	if strings.Contains(got, "sendto: operation not permitted") {
+		t.Fatalf("unexpected private candidate send noise in log output: %q", got)
+	}
+	if !strings.Contains(got, "Setting new connection state") {
+		t.Fatalf("expected normal ICE state log to pass through, got %q", got)
+	}
+}
+
 func TestDisableNoisyPionLogsMergesTurncScope(t *testing.T) {
 	t.Setenv("PION_LOG_DISABLE", "ice")
 	t.Setenv("PION_LOG_ERROR", "turnc,ice")
