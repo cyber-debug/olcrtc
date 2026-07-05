@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/openlibrecommunity/olcrtc/internal/runtime"
 	"github.com/openlibrecommunity/olcrtc/pkg/olcrtc/transportapi"
 	"github.com/xtaci/smux"
 )
@@ -296,10 +297,11 @@ func (m *Manager) connectProfileLocked(ctx context.Context, idx int) error {
 	}
 
 	var mux *smux.Session
+	smuxCfg := runtime.SmuxConfig(0)
 	if m.cfg.Server {
-		mux, err = smux.Server(raw, smux.DefaultConfig())
+		mux, err = smux.Server(raw, smuxCfg)
 	} else {
-		mux, err = smux.Client(raw, smux.DefaultConfig())
+		mux, err = smux.Client(raw, smuxCfg)
 	}
 	if err != nil {
 		_ = raw.Close()

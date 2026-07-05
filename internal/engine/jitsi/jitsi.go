@@ -24,6 +24,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,7 +42,8 @@ import (
 )
 
 const (
-	defaultSendQueueSize = 5000
+	defaultSendQueueSize = 512
+	sendQueueTimeout     = 5 * time.Second
 	// bridgeMaxMessageSize is the practical upper bound on a single colibri-ws
 	// payload. JVB enforces a max-message-size around 16 KiB; payloads above
 	// that cause the bridge to drop the websocket. The default datachannel
@@ -476,6 +478,11 @@ func (s *Session) videoTrackHandler() func(*webrtc.TrackRemote, *webrtc.RTPRecei
 func newSettingEngine() (webrtc.SettingEngine, error) {
 	settings := webrtc.SettingEngine{}
 	settings.LoggerFactory = logger.NewPionLoggerFactory()
+	settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+	settings.SetInterfaceFilter(allowICEInterface)
+	settings.SetIPFilter(func(ip net.IP) bool {
+		return ip.To4() != nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast()
+	})
 	if protect.Protector == nil {
 		return settings, nil
 	}
@@ -486,6 +493,19 @@ func newSettingEngine() (webrtc.SettingEngine, error) {
 	settings.SetNet(pnet)
 	settings.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 	return settings, nil
+}
+
+func allowICEInterface(name string) bool {
+	switch {
+	case name == "":
+		return false
+	case strings.HasPrefix(name, "docker"),
+		strings.HasPrefix(name, "br-"),
+		strings.HasPrefix(name, "veth"):
+		return false
+	default:
+		return true
+	}
 }
 
 // negotiatePC builds the pion PeerConnection, applies Jicofo's offer,
@@ -1036,11 +1056,9 @@ func buildSDPCandidate(c xmlCandidate) string {
 	return s
 }
 
-// Send queues data for transmission over the bridge.
-//
-// Send is non-blocking: data is enqueued onto the engine's outbound channel
-// and a background goroutine pumps the queue into the colibri-ws bridge with
-// the bridge's own backpressure window.
+// Send writes data to the bridge and returns after the frame has been handed to
+// the colibri-ws bridge. This gives net.Conn users real write backpressure
+// instead of reporting success while large responses are still queued locally.
 func (s *Session) Send(data []byte) error {
 	if s.closed.Load() {
 		return ErrSessionClosed
@@ -1052,10 +1070,10 @@ func (s *Session) Send(data []byte) error {
 	if err != nil {
 		return err
 	}
-	return s.enqueueBridgeFrame(framed)
+	return s.sendBridgeFrame("", framed)
 }
 
-// SendTo queues data for transmission to a specific Jitsi endpoint.
+// SendTo writes data to a specific Jitsi endpoint.
 func (s *Session) SendTo(peerID string, data []byte) error {
 	if peerID == "" {
 		return s.Send(data)
@@ -1070,7 +1088,7 @@ func (s *Session) SendTo(peerID string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	return s.enqueuePeerBridgeFrame(peerID, framed)
+	return s.sendBridgeFrame(peerID, framed)
 }
 
 func (s *Session) encodeBridgeFrame(data []byte, peerID string) ([]byte, error) {
@@ -1111,7 +1129,7 @@ func (s *Session) enqueueBridgeFrame(framed []byte) error {
 		return nil
 	case <-s.done:
 		return ErrSessionClosed
-	default:
+	case <-time.After(sendQueueTimeout):
 		return ErrSendQueueFull
 	}
 }
@@ -1131,7 +1149,7 @@ func (s *Session) enqueuePeerBridgeFrame(peerID string, framed []byte) error {
 		return nil
 	case <-s.done:
 		return ErrSessionClosed
-	default:
+	case <-time.After(sendQueueTimeout):
 		return ErrSendQueueFull
 	}
 }
@@ -1146,33 +1164,35 @@ func (s *Session) sendLoop() {
 			if !ok {
 				return
 			}
-			s.sendBridgeFrame("", data)
+			_ = s.sendBridgeFrame("", data)
 		case frame, ok := <-s.peerSendQueue:
 			if !ok {
 				return
 			}
-			s.sendBridgeFrame(frame.to, frame.data)
+			_ = s.sendBridgeFrame(frame.to, frame.data)
 		}
 	}
 }
 
-func (s *Session) sendBridgeFrame(to string, data []byte) {
+func (s *Session) sendBridgeFrame(to string, data []byte) error {
 	if !s.outboundFrameCurrent(data) {
-		return
+		return ErrBridgeNotReady
 	}
 	jSess := s.waitJSession()
 	if jSess == nil {
-		return
+		return ErrSessionClosed
 	}
 	if !s.outboundFrameCurrent(data) {
-		return
+		return ErrBridgeNotReady
 	}
 	if err := jSess.BridgeSendRaw(to, data); err != nil {
 		if s.closed.Load() {
-			return
+			return ErrSessionClosed
 		}
 		logger.Debugf("jitsi bridge send: %v", err)
+		return err
 	}
+	return nil
 }
 
 func (s *Session) waitJSession() *j.Session {
