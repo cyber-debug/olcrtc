@@ -47,6 +47,10 @@ type ManagerConfig struct {
 type managerSession interface {
 	OpenStream(ctx context.Context) (net.Conn, error)
 	AcceptStream(ctx context.Context) (net.Conn, error)
+	SendDatagram(ctx context.Context, payload []byte) error
+	SendDatagramTo(ctx context.Context, peerID string, payload []byte) error
+	ReceiveDatagram(ctx context.Context) ([]byte, error)
+	ReceivePeerDatagram(ctx context.Context) (transportapi.PeerDatagram, error)
 	Close() error
 	Capabilities() transportapi.Capabilities
 }
@@ -147,6 +151,47 @@ func (m *Manager) AcceptStream(ctx context.Context) (net.Conn, error) {
 	}
 }
 
+// SendDatagram sends one unordered lossy datagram over the active carrier.
+func (m *Manager) SendDatagram(ctx context.Context, payload []byte) error {
+	return m.sendDatagram(ctx, "", payload)
+}
+
+// SendDatagramTo sends one unordered lossy datagram to a specific peer when the
+// active carrier reports peer identities.
+func (m *Manager) SendDatagramTo(ctx context.Context, peerID string, payload []byte) error {
+	return m.sendDatagram(ctx, peerID, payload)
+}
+
+func (m *Manager) sendDatagram(ctx context.Context, peerID string, payload []byte) error {
+	session, _, err := m.readyDatagramSession(ctx)
+	if err != nil {
+		return err
+	}
+	if peerID != "" {
+		return session.SendDatagramTo(ctx, peerID, payload)
+	}
+	return session.SendDatagram(ctx, payload)
+}
+
+// ReceiveDatagram waits for one unordered lossy datagram over the active carrier.
+func (m *Manager) ReceiveDatagram(ctx context.Context) ([]byte, error) {
+	packet, err := m.ReceivePeerDatagram(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return packet.Payload, nil
+}
+
+// ReceivePeerDatagram waits for one unordered lossy datagram and preserves peer
+// identity when the carrier provides it.
+func (m *Manager) ReceivePeerDatagram(ctx context.Context) (transportapi.PeerDatagram, error) {
+	session, _, err := m.readyDatagramSession(ctx)
+	if err != nil {
+		return transportapi.PeerDatagram{}, err
+	}
+	return session.ReceivePeerDatagram(ctx)
+}
+
 // Capabilities reports the underlying session capabilities.
 func (m *Manager) Capabilities() transportapi.Capabilities {
 	m.mu.Lock()
@@ -190,6 +235,20 @@ func (m *Manager) readyMuxLocked(ctx context.Context) (*smux.Session, error) {
 		return nil, err
 	}
 	return m.mux, nil
+}
+
+func (m *Manager) readyDatagramSession(ctx context.Context) (managerSession, *smux.Session, error) {
+	m.mu.Lock()
+	mux, err := m.readyMuxLocked(ctx)
+	session := m.session
+	m.mu.Unlock()
+	if err != nil {
+		return nil, nil, err
+	}
+	if session == nil {
+		return nil, nil, ErrManagerClosed
+	}
+	return session, mux, nil
 }
 
 func (m *Manager) connectLocked(ctx context.Context) error {
