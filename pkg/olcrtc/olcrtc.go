@@ -33,10 +33,12 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 
 	"github.com/openlibrecommunity/olcrtc/internal/auth"
 	"github.com/openlibrecommunity/olcrtc/internal/engine"
 	enginebuiltin "github.com/openlibrecommunity/olcrtc/internal/engine/builtin"
+	"github.com/openlibrecommunity/olcrtc/pkg/olcrtc/transportapi"
 )
 
 var (
@@ -48,7 +50,11 @@ var (
 	ErrRoomCreationUnsupported = errors.New("olcrtc: auth provider does not support room creation")
 	// ErrSessionEnded is returned from Read/Write when the session has ended permanently.
 	ErrSessionEnded = errors.New("olcrtc: session ended")
+	// ErrDatagramTooLarge is returned when a lossy datagram exceeds the public transport contract.
+	ErrDatagramTooLarge = errors.New("olcrtc: datagram too large")
 )
+
+const defaultDatagramBuffer = 64
 
 // Config is the input to [New].
 type Config struct {
@@ -73,6 +79,14 @@ type Config struct {
 	// ProxyAddr / ProxyPort configure an outbound SOCKS5 proxy.
 	ProxyAddr string
 	ProxyPort int
+
+	// DatagramBuffer is the inbound lossy datagram queue size. Values <= 0 use
+	// a small default. When the queue is full, new datagrams are dropped.
+	DatagramBuffer int
+	// OnDatagram is called for each inbound unordered/lossy datagram.
+	OnDatagram func([]byte)
+	// OnPeerDatagram is called when an engine reports the sending peer.
+	OnPeerDatagram func(peerID string, data []byte)
 }
 
 // Session is the library handle returned by [New].
@@ -83,6 +97,10 @@ type Session struct {
 	pw           *io.PipeWriter
 	authProvider auth.Provider
 	authCfg      auth.Config
+	datagrams    chan transportapi.PeerDatagram
+	done         chan struct{}
+	closeOnce    sync.Once
+	counters     *transportapi.Counters
 }
 
 // RegisterDefaults registers all built-in engines and auth providers.
@@ -121,13 +139,20 @@ func newWithAuth(ctx context.Context, cfg Config) (*Session, error) {
 	}
 
 	pr, pw := io.Pipe()
+	datagrams := make(chan transportapi.PeerDatagram, datagramBufferSize(cfg.DatagramBuffer))
+	done := make(chan struct{})
+	counters := &transportapi.Counters{}
 	engineName := p.Engine()
 	sess, err := engine.New(ctx, engineName, engine.Config{
-		URL:       creds.URL,
-		Token:     creds.Token,
-		Name:      cfg.Name,
-		Extra:     creds.Extra,
-		OnData:    func(data []byte) { _, _ = pw.Write(data) },
+		URL:        creds.URL,
+		Token:      creds.Token,
+		Name:       cfg.Name,
+		Extra:      creds.Extra,
+		OnData:     func(data []byte) { _, _ = pw.Write(data) },
+		OnDatagram: func(data []byte) { enqueueDatagram(done, datagrams, counters, cfg.OnDatagram, data) },
+		OnPeerDatagram: func(peerID string, data []byte) {
+			enqueuePeerDatagram(done, datagrams, counters, cfg.OnPeerDatagram, peerID, data)
+		},
 		DNSServer: cfg.DNSServer,
 		ProxyAddr: cfg.ProxyAddr,
 		ProxyPort: cfg.ProxyPort,
@@ -144,7 +169,16 @@ func newWithAuth(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, fmt.Errorf("olcrtc: engine %q: %w", engineName, err)
 	}
 
-	return &Session{inner: sess, pr: pr, pw: pw, authProvider: p, authCfg: authCfg}, nil
+	return &Session{
+		inner:        sess,
+		pr:           pr,
+		pw:           pw,
+		authProvider: p,
+		authCfg:      authCfg,
+		datagrams:    datagrams,
+		done:         done,
+		counters:     counters,
+	}, nil
 }
 
 func newDirect(ctx context.Context, cfg Config) (*Session, error) {
@@ -161,11 +195,18 @@ func newDirect(ctx context.Context, cfg Config) (*Session, error) {
 	}
 
 	pr, pw := io.Pipe()
+	datagrams := make(chan transportapi.PeerDatagram, datagramBufferSize(cfg.DatagramBuffer))
+	done := make(chan struct{})
+	counters := &transportapi.Counters{}
 	sess, err := engine.New(ctx, engineName, engine.Config{
-		URL:       cfg.URL,
-		Token:     cfg.Token,
-		Name:      cfg.Name,
-		OnData:    func(data []byte) { _, _ = pw.Write(data) },
+		URL:        cfg.URL,
+		Token:      cfg.Token,
+		Name:       cfg.Name,
+		OnData:     func(data []byte) { _, _ = pw.Write(data) },
+		OnDatagram: func(data []byte) { enqueueDatagram(done, datagrams, counters, cfg.OnDatagram, data) },
+		OnPeerDatagram: func(peerID string, data []byte) {
+			enqueuePeerDatagram(done, datagrams, counters, cfg.OnPeerDatagram, peerID, data)
+		},
 		DNSServer: cfg.DNSServer,
 		ProxyAddr: cfg.ProxyAddr,
 		ProxyPort: cfg.ProxyPort,
@@ -175,7 +216,7 @@ func newDirect(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, fmt.Errorf("olcrtc: engine %q: %w", engineName, err)
 	}
 
-	return &Session{inner: sess, pr: pr, pw: pw}, nil
+	return &Session{inner: sess, pr: pr, pw: pw, datagrams: datagrams, done: done, counters: counters}, nil
 }
 
 // Dial connects and returns a [net.Conn] backed by the WebRTC data channel.
@@ -184,13 +225,121 @@ func newDirect(ctx context.Context, cfg Config) (*Session, error) {
 // when the session ends permanently, Read will return an error.
 func (s *Session) Dial(ctx context.Context) (net.Conn, error) {
 	s.inner.SetEndedCallback(func(_ string) {
-		_ = s.pw.CloseWithError(ErrSessionEnded)
+		s.endSession(ErrSessionEnded)
 	})
 	if err := s.Connect(ctx); err != nil {
 		return nil, err
 	}
 	go s.inner.WatchConnection(ctx)
+	s.counters.StreamOpened()
 	return &conn{s: s}, nil
+}
+
+// OpenStream opens one reliable ordered byte stream. It is equivalent to
+// [Session.Dial] and exists so Session satisfies transportapi.Dialer.
+func (s *Session) OpenStream(ctx context.Context) (net.Conn, error) {
+	return s.Dial(ctx)
+}
+
+// AcceptStream accepts the single reliable ordered byte stream exposed by the
+// current olcrtc session. It is equivalent to [Session.Dial]; olcrtc does not
+// expose independent multi-accept streams through this package yet.
+func (s *Session) AcceptStream(ctx context.Context) (net.Conn, error) {
+	return s.Dial(ctx)
+}
+
+// Capabilities reports the public transport contract exposed by Session.
+func (s *Session) Capabilities() transportapi.Capabilities {
+	caps := transportapi.DefaultCapabilities()
+	if s == nil || s.inner == nil {
+		return caps
+	}
+	engineCaps := s.inner.Capabilities()
+	caps.LossyDatagrams = engineCaps.Datagram
+	return caps
+}
+
+// SendDatagram sends one unordered/lossy datagram when the selected engine
+// supports a datagram path.
+func (s *Session) SendDatagram(ctx context.Context, payload []byte) error {
+	return s.sendDatagram(ctx, "", payload)
+}
+
+// SendDatagramTo sends one unordered/lossy datagram to peerID when the
+// selected engine can address peers. An empty peerID falls back to broadcast
+// SendDatagram semantics.
+func (s *Session) SendDatagramTo(ctx context.Context, peerID string, payload []byte) error {
+	return s.sendDatagram(ctx, peerID, payload)
+}
+
+func (s *Session) sendDatagram(ctx context.Context, peerID string, payload []byte) error {
+	if len(payload) > transportapi.MaxDatagramPayload {
+		return ErrDatagramTooLarge
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("send datagram context: %w", err)
+	}
+	if peerID != "" {
+		return s.sendPeerDatagram(peerID, payload)
+	}
+	return s.sendBroadcastDatagram(payload)
+}
+
+func (s *Session) sendPeerDatagram(peerID string, payload []byte) error {
+	peer, ok := s.inner.(engine.PeerDatagramSession)
+	if !ok {
+		return engine.ErrDatagramUnsupported
+	}
+	if dg, ok := s.inner.(engine.DatagramSession); ok && !dg.DatagramCanSend() {
+		return engine.ErrDatagramUnsupported
+	}
+	if err := peer.SendDatagramTo(peerID, payload); err != nil {
+		return fmt.Errorf("send peer datagram: %w", err)
+	}
+	s.counters.DatagramOut()
+	return nil
+}
+
+func (s *Session) sendBroadcastDatagram(payload []byte) error {
+	dg, ok := s.inner.(engine.DatagramSession)
+	if !ok {
+		return engine.ErrDatagramUnsupported
+	}
+	if !dg.DatagramCanSend() {
+		return engine.ErrDatagramUnsupported
+	}
+	if err := dg.SendDatagram(payload); err != nil {
+		return fmt.Errorf("send datagram: %w", err)
+	}
+	s.counters.DatagramOut()
+	return nil
+}
+
+// ReceiveDatagram waits for one inbound unordered/lossy datagram.
+func (s *Session) ReceiveDatagram(ctx context.Context) ([]byte, error) {
+	dg, err := s.ReceivePeerDatagram(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return dg.Payload, nil
+}
+
+// ReceivePeerDatagram waits for one inbound unordered/lossy datagram and
+// returns peer identity when the engine reported one.
+func (s *Session) ReceivePeerDatagram(ctx context.Context) (transportapi.PeerDatagram, error) {
+	select {
+	case dg := <-s.datagrams:
+		return dg, nil
+	case <-s.done:
+		return transportapi.PeerDatagram{}, ErrSessionEnded
+	case <-ctx.Done():
+		return transportapi.PeerDatagram{}, fmt.Errorf("receive datagram context: %w", ctx.Err())
+	}
+}
+
+// Metrics returns an immutable snapshot of process-local transport counters.
+func (s *Session) Metrics() transportapi.Metrics {
+	return s.counters.Snapshot()
 }
 
 // Connect establishes the WebRTC connection. Blocks until the data channel (or
@@ -210,12 +359,89 @@ func (s *Session) Send(data []byte) error {
 	return nil
 }
 
+func datagramBufferSize(size int) int {
+	if size > 0 {
+		return size
+	}
+	return defaultDatagramBuffer
+}
+
+func enqueuePeerDatagram(
+	done <-chan struct{},
+	queue chan<- transportapi.PeerDatagram,
+	counters *transportapi.Counters,
+	cb func(peerID string, data []byte),
+	peerID string,
+	data []byte,
+) {
+	if cb != nil {
+		cb(peerID, cloneBytes(data))
+	}
+	enqueueDatagramPacket(done, queue, counters, transportapi.PeerDatagram{
+		PeerID:  peerID,
+		Payload: cloneBytes(data),
+	})
+}
+
+func enqueueDatagram(
+	done <-chan struct{},
+	queue chan<- transportapi.PeerDatagram,
+	counters *transportapi.Counters,
+	cb func([]byte),
+	data []byte,
+) {
+	payload := cloneBytes(data)
+	if cb != nil {
+		cb(cloneBytes(payload))
+	}
+	enqueueDatagramPacket(done, queue, counters, transportapi.PeerDatagram{Payload: payload})
+}
+
+func enqueueDatagramPacket(
+	done <-chan struct{},
+	queue chan<- transportapi.PeerDatagram,
+	counters *transportapi.Counters,
+	dg transportapi.PeerDatagram,
+) {
+	select {
+	case <-done:
+		if counters != nil {
+			counters.DatagramDrop()
+		}
+	case queue <- dg:
+		if counters != nil {
+			counters.DatagramIn()
+		}
+	default:
+		if counters != nil {
+			counters.DatagramDrop()
+		}
+	}
+}
+
+func cloneBytes(data []byte) []byte {
+	if len(data) == 0 {
+		return nil
+	}
+	out := make([]byte, len(data))
+	copy(out, data)
+	return out
+}
+
 // Close tears down the session and releases all resources.
 func (s *Session) Close() error {
+	s.endSession(net.ErrClosed)
 	if err := s.inner.Close(); err != nil {
 		return fmt.Errorf("close: %w", err)
 	}
 	return nil
+}
+
+func (s *Session) endSession(err error) {
+	s.closeOnce.Do(func() {
+		_ = s.pw.CloseWithError(err)
+		close(s.done)
+	})
 }
 
 // WatchConnection monitors the connection and handles reconnects. Run in a

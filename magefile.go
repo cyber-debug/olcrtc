@@ -98,10 +98,13 @@ func Everything() {
 // Build
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Build builds the olcrtc CLI binary for the host platform.
+// Build builds the olcrtc CLI binaries for the host platform.
 func Build() error {
 	mg.Deps(Deps)
-	return buildBinary("olcrtc", "./cmd/olcrtc", goos, goarch)
+	if err := buildBinary("olcrtc", "./cmd/olcrtc", goos, goarch); err != nil {
+		return err
+	}
+	return buildBinary("olcrtc-vless", "./cmd/olcrtc-vless", goos, goarch)
 }
 
 // Cross builds olcrtc for all supported platforms.

@@ -13,7 +13,7 @@
 
 # olcRTC
 
-`olcRTC` (OpenLibreCommunity RTC) is an encrypted TCP-over-WebRTC tunnel. Traffic is disguised as an ordinary video call on allowed services (Jitsi, Yandex Telemost, WbStream). Inside there is XChaCha20-Poly1305 encryption and smux multiplexing over WebRTC data/video channels.
+`olcRTC` (OpenLibreCommunity RTC) is an encrypted TCP/UDP-over-WebRTC tunnel. Traffic is disguised as an ordinary video call on allowed services (Jitsi, Yandex Telemost, WbStream). Inside there is XChaCha20-Poly1305 encryption and smux multiplexing over WebRTC data/video channels.
 
 Status: **Beta**
 
@@ -28,6 +28,7 @@ app -> SOCKS5 -> olcrtc cnc -> WebRTC/SFU service -> olcrtc srv -> internet
 - **Providers:** `jitsi`, `telemost`, `wbstream`
 - **Transports:** `datachannel`, `vp8channel`, `seichannel`, `videochannel`
 - **Platforms:** Linux, macOS, Windows, Android (gomobile), embeddable Go library
+- **Embeddable protocol layer:** public stream/datagram transport API with VLESS TCP/UDP adapter foundations
 
 Recommended start: `jitsi + datachannel`.
 

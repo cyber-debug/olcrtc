@@ -177,9 +177,12 @@ Active smux streams do not migrate when the profile changes. New connections can
 | Path | What is inside |
 |---|---|
 | `cmd/olcrtc` | CLI entrypoint |
+| `cmd/olcrtc-vless` | experimental SOCKS5 TCP bridge for VLESS-over-olcrtc |
 | `cmd/olcrtc-cgo` | c-shared entrypoint |
 | `pkg/olcrtc` | embeddable client/engine API |
 | `pkg/olcrtc/tunnel` | embeddable server tunnel API |
+| `pkg/olcrtc/transportapi` | stable transport interfaces, capabilities, datagram contract, metrics |
+| `pkg/olcrtc/vless` | minimal VLESS TCP/UDP adapter over olcrtc streams and datagrams |
 | `mobile` | gomobile bindings for Android |
 | `internal/config` | YAML parsing, `crypto.key_file` |
 | `internal/app/session` | defaults, validation, routing into `srv`/`cnc`/`gen` |
@@ -221,6 +224,34 @@ if err != nil {
 }
 conn, err := sess.Dial(ctx)
 ```
+
+For protocol integrations, `Session` also satisfies `transportapi.Dialer`,
+`transportapi.Listener`, `transportapi.DatagramSender`,
+`transportapi.DatagramReceiver`, `transportapi.PeerDatagramSender`, and
+`transportapi.PeerDatagramReceiver`:
+
+```go
+stream, err := sess.OpenStream(ctx)
+accepted, err := sess.AcceptStream(ctx)
+caps := sess.Capabilities()
+err = sess.SendDatagram(ctx, []byte("payload"))
+err = sess.SendDatagramTo(ctx, "peer-id", []byte("payload"))
+metrics := sess.Metrics()
+```
+
+The `pkg/olcrtc/vless` adapter keeps olcrtc as a transport. It implements
+minimal VLESS TCP request/response framing over one reliable olcrtc stream per
+request and authenticated VLESS UDP packet framing over olcrtc datagrams.
+`ServeUDP` runs a long-lived relay with per-peer destination associations,
+idle expiry, association limits, peer-addressed replies when available, and
+process-local relay metrics. It does not replace Xray-core and is not a
+drop-in transport for existing Xray/Happ clients until those clients learn the
+olcrtc transport.
+
+`AcceptStream` exposes the same single reliable session stream as `OpenStream`;
+the current public API does not yet expose independent multi-accept streams.
+Inbound datagrams use a bounded lossy queue: when the consumer is too slow,
+new datagrams are dropped and `Metrics().DatagramDrops` is incremented.
 
 `pkg/olcrtc/tunnel` embeds the server side and exposes hooks:
 
@@ -282,3 +313,4 @@ E2E_CARRIERS=wbstream E2E_TRANSPORTS= vp8channel mage e2e
 - [Compatibility matrix](settings.md)
 - [URI format](uri.md)
 - [Subscription format](sub.md)
+- [VLESS over olcrtc](vless.ru.md)
